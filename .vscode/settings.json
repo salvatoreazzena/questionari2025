@@ -1,5 +1,9 @@
 {
     "chat.tools.terminal.autoApprove": {
-        "py": true
+        "py": true,
+        "/^cd /Users/salvatoreazzena/Desktop/questionari2025 && /opt/homebrew/bin/python3\\.12 - <<'PY'\nimport pandas as pd\nfrom pathlib import Path\np=Path\\('questionari_fonte\\.xlsx'\\)\nxls=pd\\.ExcelFile\\(p\\)\nsh=xls\\.sheet_names\\[0\\]\ndf=pd\\.read_excel\\(p, sheet_name=sh\\)\nprint\\('sheet:', sh\\)\nprint\\('nrows:', len\\(df\\), 'ncols:', len\\(df\\.columns\\)\\)\nprint\\('columns:'\\)\nfor c in df\\.columns:\n    print\\(c\\)\nPY$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }
