@@ -12,8 +12,8 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 
 DEFAULT_INPUT = Path("questionari_fonte.xlsx")
-DEFAULT_OUTPUT = Path("questionari_outlier_pernottanti.xlsx")
-DEFAULT_OUTPUT_NO_IMPUTATION = Path("questionari_outlier_pernottanti_no_imputazioni.xlsx")
+DEFAULT_OUTPUT = Path("questionari_outlier_pernottanti_con_pacchetto.xlsx")
+DEFAULT_OUTPUT_NO_IMPUTATION = Path("questionari_outlier_pernottanti_con_pacchetto_no_imputazioni.xlsx")
 
 ID_COL = "ID"
 DURATION_COL = "durata_soggiorno"
@@ -21,20 +21,14 @@ PACCHETTO_COL = "pacchetto"
 STATO_COL = "stato_provenienza"
 MOTIV_COL = "motivazione_principale"
 COMPONENTI_COL = "numero_componenti"
+SPESA_PACCHETTO_COL = "spesa_pacchetto"
+PACCHETTO_ALLOWED_VALUES = {"A", "B", "C"}
 
-SPESA_COLUMNS = [
-    "spese_trasporto_viaggio",
-    "spese_trasporto_interno",
-    "spese_alloggio",
-    "spese_alimentazione",
-    "spese_ristorazione",
-    "spese_souvenir",
-    "spese_altre",
-]
+SPESA_COLUMNS = [SPESA_PACCHETTO_COL]
 
 NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A."}
 
-ANALYSIS_SHEET = "pernottanti_senza_pacchetto"
+ANALYSIS_SHEET = "pernottanti_con_pacchetto_ABC"
 STATS_SHEET = "statistiche"
 RED_FILL = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
 YELLOW_FILL = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
@@ -349,7 +343,7 @@ def build_stats_table(
             {"metrica": "turisti_analizzati_filtro", "valore": analyzed_tourists},
             {
                 "metrica": "filtro_applicato",
-                "valore": "durata_soggiorno >= 1 AND pacchetto vuoto",
+                "valore": "durata_soggiorno >= 1 AND pacchetto IN (A, B, C)",
             },
             {
                 "metrica": "gruppo_omogeneo_outlier",
@@ -482,8 +476,9 @@ def run(input_file: Path, output_file: Path, output_file_no_imputation: Path) ->
     df["_componenti_num"] = pd.to_numeric(df[COMPONENTI_COL], errors="coerce")
     df["_turisti_weight"] = build_tourist_weight_series(df["_componenti_num"])
 
-    pacchetto_empty = df[PACCHETTO_COL].map(is_strict_empty)
-    filter_mask = (df["_durata_num"] >= 1) & pacchetto_empty
+    pacchetto_norm = df[PACCHETTO_COL].astype("string").fillna("").str.strip().str.upper()
+    pacchetto_abc = pacchetto_norm.isin(PACCHETTO_ALLOWED_VALUES)
+    filter_mask = (df["_durata_num"] >= 1) & pacchetto_abc
 
     analyzed = df.loc[filter_mask].copy()
     analyzed.reset_index(drop=True, inplace=True)
@@ -630,7 +625,7 @@ def run(input_file: Path, output_file: Path, output_file_no_imputation: Path) ->
     stats_thresholds_df = build_thresholds_stats_table(thresholds_by_spesa)
 
     if analyzed.empty:
-        print("Nessun questionario soddisfa il filtro: durata_soggiorno >= 1 e pacchetto vuoto.")
+        print("Nessun questionario soddisfa il filtro: durata_soggiorno >= 1 e pacchetto IN (A, B, C).")
 
     write_output_excel(
         output_file=output_file,
@@ -704,7 +699,7 @@ def main() -> None:
         description=(
             "Rilevazione outlier (p5-p95) su spesa pro capite giornaliera "
             "(spesa/(numero_componenti*durata_soggiorno)) e imputazione ND sulle spese "
-            "per pernottanti senza pacchetto."
+            "per pernottanti con pacchetto A/B/C, analizzando solo spesa_pacchetto."
         )
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="File Excel sorgente")
