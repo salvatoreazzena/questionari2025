@@ -1,1 +1,91 @@
 # questionari2025
+
+## Script disponibili
+
+### 1) Analisi preliminare campione
+
+File: `build_analisi_preliminare.py`
+
+Esecuzione:
+
+```bash
+python build_analisi_preliminare.py
+```
+
+Input atteso: `questionari_fonte.xlsx`
+
+Output: `analisi_preliminare_campione.xlsx`
+
+### 2) Normalizzazione provenienza
+
+File: `normalizza_provenienza.py`
+
+Esecuzione:
+
+```bash
+python normalizza_provenienza.py --input questionari_fonte.xlsx --output questionari_fonte_modificato.xlsx
+```
+
+Opzione inplace:
+
+```bash
+python normalizza_provenienza.py --input questionari_fonte.xlsx --inplace
+```
+
+### 3) Outlier spese e inferenza ND (pernottanti senza pacchetto)
+
+File: `outlier_spese_pernottanti.py`
+
+Esecuzione default:
+
+```bash
+python outlier_spese_pernottanti.py
+```
+
+Esecuzione con percorsi espliciti:
+
+```bash
+python outlier_spese_pernottanti.py --input questionari_fonte.xlsx --output questionari_outlier_pernottanti.xlsx --output-no-imputation questionari_outlier_pernottanti_no_imputazioni.xlsx
+```
+
+#### Regole applicate
+
+- Campione analizzato: solo questionari con `durata_soggiorno >= 1` e `pacchetto` strettamente vuoto.
+- Colonne spesa trattate:
+	- `spese_trasporto_viaggio`
+	- `spese_trasporto_interno`
+	- `spese_alloggio`
+	- `spese_alimentazione`
+	- `spese_ristorazione`
+	- `spese_souvenir`
+	- `spese_altre`
+- Gruppi omogenei per outlier: `macro_provenienza (ITALIANI/STRANIERI) x motivazione_principale`.
+- Metrica per outlier: `spesa_pro_capite_giornaliera = spesa / (numero_componenti * durata_soggiorno)`.
+- Soglie outlier: 5° e 95° percentile della metrica pro capite giornaliera per ogni colonna spesa all'interno del gruppo omogeneo.
+- Outlier: evidenziati in rosso, senza sostituzione del valore originale.
+- Valori ND (o simili): inferiti con mediana da questionari simili.
+- Similarita per inferenza ND: `macro_provenienza`, `numero_componenti`, `durata_soggiorno`, `motivazione_principale`.
+- Fallback inferenza donor: gruppo completo, poi macro+motivazione, poi macro, poi motivazione, poi globale colonna.
+
+#### Output prodotto
+
+- File Excel: `questionari_outlier_pernottanti.xlsx`
+- File Excel parallelo senza imputazioni ND: `questionari_outlier_pernottanti_no_imputazioni.xlsx`
+- Fogli:
+	- `pernottanti_senza_pacchetto`
+	- `statistiche`
+- Include solo i questionari analizzati dal filtro.
+- Colori celle spesa:
+	- Rosso: outlier
+	- Giallo: valore ND imputato
+	- Arancione: valore ND imputato che risulta anche outlier rispetto a p5/p95 del gruppo
+- Colonne aggiuntive nel foglio principale:
+	- una sola colonna per ogni spesa nel formato `imputazione_<colonna_spesa>`
+	- la cella indica come e stato imputato il valore (metodo e donor ID)
+	- nel file parallelo senza imputazioni queste colonne non sono presenti, i valori ND restano ND ed e aggiunta la colonna `outlier_presente` (`SI`/`NO`)
+- Contenuto foglio `statistiche`:
+	- numero turisti input e analizzati (conteggi pesati su `numero_componenti`)
+	- numero turisti con imputazioni per colonna spesa
+	- numero turisti con imputazioni che risultano outlier per colonna spesa
+	- numero turisti outlier per colonna spesa
+	- tabella soglie reali usate per outlier (`p5_gruppo` e `p95_gruppo`) per ogni combinazione `colonna_spesa x macro_provenienza x motivazione_grp`, con `n_turisti_gruppo` pesato su `numero_componenti`

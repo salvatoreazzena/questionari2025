@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pandas as pd
 
 INPUT_FILE = Path("questionari_fonte.xlsx")
 OUTPUT_FILE = Path("analisi_preliminare_campione.xlsx")
 NULL_VALUE = "NULL"
+UNDEFINED_LABEL = "NON DEFINITO"
 
 NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A."}
 CASE_INSENSITIVE_COLUMNS = {
@@ -28,6 +30,7 @@ REQUIRED_COLUMNS = [
     "tipologia_turistica",
     "stato_provenienza",
     "regione_provenienza",
+    "località_visitate",
     "motivazione_principale",
 ]
 
@@ -73,23 +76,17 @@ def add_distribution_rows(
     if limit is not None:
         counts_df = counts_df.head(limit)
 
-    valid_mask = source_series != NULL_VALUE
-    valid_den_questionari = int(valid_mask.sum())
-    valid_den_componenti = int(componenti_series[valid_mask].sum())
-
     for _, row in counts_df.iterrows():
         value = row["valore"]
         questionari_int = int(row["questionari"])
         componenti_int = int(row["componenti"])
 
-        pct_q_valid = (
-            (questionari_int / valid_den_questionari * 100.0) if valid_den_questionari > 0 else None
-        )
         pct_q_total = (questionari_int / total_questionari * 100.0) if total_questionari > 0 else None
-        pct_c_valid = (
-            (componenti_int / valid_den_componenti * 100.0) if valid_den_componenti > 0 else None
-        )
         pct_c_total = (componenti_int / total_componenti * 100.0) if total_componenti > 0 else None
+
+        value_str = str(value)
+        if pd.isna(value) or value_str.upper() == NULL_VALUE:
+            value_str = UNDEFINED_LABEL
 
         rows.append(
             {
@@ -98,12 +95,10 @@ def add_distribution_rows(
                 "metrica": "count",
                 "dimensione_1": dimensione_1,
                 "dimensione_2": dimensione_2,
-                "valore_categoria": str(value),
+                "valore_categoria": value_str,
                 "questionari": questionari_int,
                 "componenti": componenti_int,
-                "pct_questionari_su_validi": pct_q_valid,
                 "pct_questionari_su_totale": pct_q_total,
-                "pct_componenti_su_validi": pct_c_valid,
                 "pct_componenti_su_totale": pct_c_total,
             }
         )
@@ -112,6 +107,66 @@ def add_distribution_rows(
 def to_numeric_sum(series: pd.Series) -> int:
     numeric = pd.to_numeric(series, errors="coerce")
     return int(numeric.fillna(0).sum())
+
+
+def extract_prevalent_destination(value: object) -> str:
+    if pd.isna(value):
+        return NULL_VALUE
+
+    raw_text = str(value).strip()
+    if not raw_text or raw_text == NULL_VALUE:
+        return NULL_VALUE
+
+    # Alcuni questionari racchiudono tutta la lista tra parentesi esterne.
+    if raw_text.startswith("(") and raw_text.endswith(")"):
+        raw_text = raw_text[1:-1].strip()
+
+    if not raw_text:
+        return NULL_VALUE
+
+    days_by_destination: dict[str, int] = {}
+    first_position: dict[str, int] = {}
+    pair_pattern = re.compile(r"\s*([^,;][^,;]*?)\s*,\s*([0-9]+(?:[.,][0-9]+)?)\s*(?=;|,|$)")
+
+    # Ogni coppia finisce sul numero giorni; accettiamo sia ';' sia ',' come separatore tra coppie.
+    matches = list(pair_pattern.finditer(raw_text))
+    for idx, match in enumerate(matches):
+        destination_raw = match.group(1).strip()
+        days_raw = match.group(2).strip()
+
+        # Esclude il testo tra parentesi nel nome localita (frazione/area).
+        destination_clean = re.sub(r"\s*\([^)]*\)\s*", " ", destination_raw)
+        # Rimuove eventuali prefissi di indice dovuti a formattazioni errate (es. "0: PALAU").
+        destination_clean = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", destination_clean)
+        destination_clean = re.sub(r"\s+", " ", destination_clean).strip()
+        if not destination_clean:
+            continue
+
+        try:
+            days_float = float(days_raw.replace(",", "."))
+        except ValueError:
+            continue
+
+        if not days_float.is_integer():
+            continue
+
+        days_int = int(days_float)
+        if days_int <= 0:
+            continue
+
+        destination_key = destination_clean.upper()
+        if destination_key not in first_position:
+            first_position[destination_key] = idx
+        days_by_destination[destination_key] = days_by_destination.get(destination_key, 0) + days_int
+
+    if not days_by_destination:
+        return NULL_VALUE
+
+    prevalent_destination = min(
+        days_by_destination.keys(),
+        key=lambda k: (-days_by_destination[k], first_position[k], k),
+    )
+    return prevalent_destination
 
 
 def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
@@ -127,38 +182,32 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
                 "Analisi": f"{analisi_id}. {analisi_nome}",
                 "Categoria": "",
                 "Questionari": "",
-                "% Questionari su validi": "",
                 "% Questionari su totale": "",
                 "Componenti": "",
-                "% Componenti su validi": "",
                 "% Componenti su totale": "",
             }
         )
 
         if analisi_id == 8:
-            states = section[section["dimensione_2"] == "top_5_paesi_esteri"].sort_values(
+            states = section[section["dimensione_2"] == "paesi_esteri"].sort_values(
                 by=["ordinamento", "valore_categoria"],
                 kind="mergesort",
             )
-            regions = section[section["dimensione_2"] == "top_5_regioni_italiane"].sort_values(
+            regions = section[section["dimensione_2"] == "regioni_italiane"].sort_values(
                 by=["ordinamento", "valore_categoria"],
                 kind="mergesort",
             )
 
             for _, r in states.iterrows():
-                pct_q_valid = "" if pd.isna(r["pct_questionari_su_validi"]) else float(r["pct_questionari_su_validi"])
                 pct_q_total = "" if pd.isna(r["pct_questionari_su_totale"]) else float(r["pct_questionari_su_totale"])
-                pct_c_valid = "" if pd.isna(r["pct_componenti_su_validi"]) else float(r["pct_componenti_su_validi"])
                 pct_c_total = "" if pd.isna(r["pct_componenti_su_totale"]) else float(r["pct_componenti_su_totale"])
                 rows.append(
                     {
                         "Analisi": "",
                         "Categoria": str(r["valore_categoria"]),
                         "Questionari": int(r["questionari"]),
-                        "% Questionari su validi": pct_q_valid,
                         "% Questionari su totale": pct_q_total,
                         "Componenti": int(r["componenti"]),
-                        "% Componenti su validi": pct_c_valid,
                         "% Componenti su totale": pct_c_total,
                     }
                 )
@@ -168,36 +217,28 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
                     "Analisi": "",
                     "Categoria": "",
                     "Questionari": "",
-                    "% Questionari su validi": "",
                     "% Questionari su totale": "",
                     "Componenti": "",
-                    "% Componenti su validi": "",
                     "% Componenti su totale": "",
                 }
             )
 
             for _, r in regions.iterrows():
-                pct_q_valid = "" if pd.isna(r["pct_questionari_su_validi"]) else float(r["pct_questionari_su_validi"])
                 pct_q_total = "" if pd.isna(r["pct_questionari_su_totale"]) else float(r["pct_questionari_su_totale"])
-                pct_c_valid = "" if pd.isna(r["pct_componenti_su_validi"]) else float(r["pct_componenti_su_validi"])
                 pct_c_total = "" if pd.isna(r["pct_componenti_su_totale"]) else float(r["pct_componenti_su_totale"])
                 rows.append(
                     {
                         "Analisi": "",
                         "Categoria": str(r["valore_categoria"]),
                         "Questionari": int(r["questionari"]),
-                        "% Questionari su validi": pct_q_valid,
                         "% Questionari su totale": pct_q_total,
                         "Componenti": int(r["componenti"]),
-                        "% Componenti su validi": pct_c_valid,
                         "% Componenti su totale": pct_c_total,
                     }
                 )
         else:
             for _, r in section.iterrows():
-                pct_q_valid = "" if pd.isna(r["pct_questionari_su_validi"]) else float(r["pct_questionari_su_validi"])
                 pct_q_total = "" if pd.isna(r["pct_questionari_su_totale"]) else float(r["pct_questionari_su_totale"])
-                pct_c_valid = "" if pd.isna(r["pct_componenti_su_validi"]) else float(r["pct_componenti_su_validi"])
                 pct_c_total = "" if pd.isna(r["pct_componenti_su_totale"]) else float(r["pct_componenti_su_totale"])
 
                 rows.append(
@@ -205,10 +246,8 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
                         "Analisi": "",
                         "Categoria": str(r["valore_categoria"]),
                         "Questionari": int(r["questionari"]),
-                        "% Questionari su validi": pct_q_valid,
                         "% Questionari su totale": pct_q_total,
                         "Componenti": int(r["componenti"]),
-                        "% Componenti su validi": pct_c_valid,
                         "% Componenti su totale": pct_c_total,
                     }
                 )
@@ -218,10 +257,8 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
                 "Analisi": "",
                 "Categoria": "",
                 "Questionari": "",
-                "% Questionari su validi": "",
                 "% Questionari su totale": "",
                 "Componenti": "",
-                "% Componenti su validi": "",
                 "% Componenti su totale": "",
             }
         )
@@ -230,10 +267,8 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
                 "Analisi": "",
                 "Categoria": "",
                 "Questionari": "",
-                "% Questionari su validi": "",
                 "% Questionari su totale": "",
                 "Componenti": "",
-                "% Componenti su validi": "",
                 "% Componenti su totale": "",
             }
         )
@@ -244,10 +279,8 @@ def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
             "Analisi",
             "Categoria",
             "Questionari",
-            "% Questionari su validi",
             "% Questionari su totale",
             "Componenti",
-            "% Componenti su validi",
             "% Componenti su totale",
         ],
     )
@@ -269,9 +302,7 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
             "valore_categoria": "Totale questionari",
             "questionari": total_questionari,
             "componenti": total_componenti,
-            "pct_questionari_su_validi": None,
             "pct_questionari_su_totale": None,
-            "pct_componenti_su_validi": None,
             "pct_componenti_su_totale": None,
         }
     )
@@ -287,9 +318,7 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
             "valore_categoria": "Totale componenti",
             "questionari": total_questionari,
             "componenti": total_componenti,
-            "pct_questionari_su_validi": None,
             "pct_questionari_su_totale": None,
-            "pct_componenti_su_validi": None,
             "pct_componenti_su_totale": None,
         }
     )
@@ -340,14 +369,8 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
                 "valore_categoria": label,
                 "questionari": questionari_int,
                 "componenti": componenti_int,
-                "pct_questionari_su_validi": (questionari_int / total_questionari * 100.0)
-                if total_questionari > 0
-                else None,
                 "pct_questionari_su_totale": (questionari_int / total_questionari * 100.0)
                 if total_questionari > 0
-                else None,
-                "pct_componenti_su_validi": (componenti_int / total_componenti * 100.0)
-                if total_componenti > 0
                 else None,
                 "pct_componenti_su_totale": (componenti_int / total_componenti * 100.0)
                 if total_componenti > 0
@@ -403,8 +426,8 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
             dimensione_1="composizione_campione",
         )
 
-    # 8) Provenienza: top 5 paesi esteri e top 5 regioni italiane (ranking su componenti)
-    paesi_esteri = naz[(naz != NULL_VALUE) & (naz.str.upper() != "ITALIA")]
+    # 8) Provenienza: distribuzione completa paesi esteri e regioni italiane (ranking su componenti)
+    paesi_esteri = naz[naz.str.upper() != "ITALIA"]
     add_distribution_rows(
         rows,
         analisi_id=8,
@@ -414,13 +437,12 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
         total_questionari=total_questionari,
         total_componenti=total_componenti,
         dimensione_1="stato_provenienza",
-        dimensione_2="top_5_paesi_esteri",
+        dimensione_2="paesi_esteri",
         sort_by="componenti",
-        limit=5,
     )
 
     regioni = df["regione_provenienza"]
-    regioni_ita = regioni[(naz.str.upper() == "ITALIA") & (regioni != NULL_VALUE)]
+    regioni_ita = regioni[naz.str.upper() == "ITALIA"]
     add_distribution_rows(
         rows,
         analisi_id=8,
@@ -430,9 +452,8 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
         total_questionari=total_questionari,
         total_componenti=total_componenti,
         dimensione_1="regione_provenienza",
-        dimensione_2="top_5_regioni_italiane",
+        dimensione_2="regioni_italiane",
         sort_by="componenti",
-        limit=5,
     )
 
     # 9) Distribuzione motivazioni principali
@@ -447,12 +468,24 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
         dimensione_1="motivazione_principale",
     )
 
+    # 10) Distribuzione destinazione prevalente (estratta da localita_visitate)
+    destinazione_prevalente = df["località_visitate"].apply(extract_prevalent_destination)
+    add_distribution_rows(
+        rows,
+        analisi_id=10,
+        analisi_nome="Distribuzione destinazione prevalente",
+        source_series=destinazione_prevalente,
+        componenti_series=df["numero_componenti_num"],
+        total_questionari=total_questionari,
+        total_componenti=total_componenti,
+        dimensione_1="destinazione_prevalente",
+        sort_by="componenti",
+    )
+
     out = pd.DataFrame(rows)
     out["ordinamento"] = out.groupby(["analisi_id", "dimensione_1", "dimensione_2"]).cumcount() + 1
 
-    out["pct_questionari_su_validi"] = out["pct_questionari_su_validi"].round(4)
     out["pct_questionari_su_totale"] = out["pct_questionari_su_totale"].round(4)
-    out["pct_componenti_su_validi"] = out["pct_componenti_su_validi"].round(4)
     out["pct_componenti_su_totale"] = out["pct_componenti_su_totale"].round(4)
 
     out = out[
@@ -465,9 +498,7 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
             "valore_categoria",
             "questionari",
             "componenti",
-            "pct_questionari_su_validi",
             "pct_questionari_su_totale",
-            "pct_componenti_su_validi",
             "pct_componenti_su_totale",
             "ordinamento",
         ]
