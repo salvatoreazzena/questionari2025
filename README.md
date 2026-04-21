@@ -89,3 +89,43 @@ python outlier_spese_pernottanti.py --input questionari_fonte.xlsx --output ques
 	- numero turisti con imputazioni che risultano outlier per colonna spesa
 	- numero turisti outlier per colonna spesa
 	- tabella soglie reali usate per outlier (`p5_gruppo` e `p95_gruppo`) per ogni combinazione `colonna_spesa x macro_provenienza x motivazione_grp`, con `n_turisti_gruppo` pesato su `numero_componenti`
+
+### 4) Estrazione sottocampioni (pernottanti senza pacchetto)
+
+File: `estrai_sottocampioni.py`
+
+Esecuzione default:
+
+```bash
+python estrai_sottocampioni.py
+```
+
+Esecuzione con percorsi espliciti:
+
+```bash
+python estrai_sottocampioni.py --input questionari_fonte_veri_outlier_sostituiti_imputati.xlsx --output questionari_sottocampioni.xlsx
+```
+
+#### Regole applicate
+
+- Perimetro: solo righe con `durata_soggiorno > 0`, `pacchetto` strettamente vuoto, `fascia_età` valorizzata e `numero_componenti > 0`.
+- Unita statistica: `numero_componenti` (turisti), non numero questionari.
+- Quote per fasce d'eta: uguali tra tutte le fasce considerate nel campione.
+- Target per cella: massimo comune possibile, pari al minimo `numero_componenti` disponibile tra tutte le celle richieste dal campione.
+- Selezione: questionari interi (nessun frazionamento), ordinamento deterministico.
+
+#### Campioni prodotti
+
+- `campione_1`: 50% italiani e 50% stranieri, distribuiti nelle fasce d'eta comuni ai due gruppi.
+- `campione_2`: top 5 paesi esteri (ranking per `numero_componenti`) x fasce d'eta comuni.
+- `campione_3`: top 5 regioni italiane (ranking per `numero_componenti`) x fasce d'eta comuni.
+
+#### Output prodotto
+
+- File Excel: `questionari_sottocampioni.xlsx`
+- Fogli:
+	- `campione_1`
+	- `campione_2`
+	- `campione_3`
+	- `diagnostica_celle` (disponibili, target, selezionati e overshoot per ogni cella)
+	- `meta` (riepilogo run e parametri effettivi dei campioni)
