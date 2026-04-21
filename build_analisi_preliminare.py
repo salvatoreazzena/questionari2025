@@ -7,6 +7,7 @@ import pandas as pd
 
 INPUT_FILE = Path("questionari_fonte.xlsx")
 OUTPUT_FILE = Path("analisi_preliminare_campione.xlsx")
+OUTPUT_UNDEFINED_DESTINATIONS_FILE = Path("questionari_localita_prevalente_non_definita.xlsx")
 NULL_VALUE = "NULL"
 UNDEFINED_LABEL = "NON DEFINITO"
 
@@ -109,6 +110,15 @@ def to_numeric_sum(series: pd.Series) -> int:
     return int(numeric.fillna(0).sum())
 
 
+def clean_destination_name(destination_raw: str) -> str:
+    # Esclude il testo tra parentesi nel nome localita (frazione/area).
+    destination_clean = re.sub(r"\s*\([^)]*\)\s*", " ", destination_raw)
+    # Rimuove eventuali prefissi di indice dovuti a formattazioni errate (es. "0: PALAU").
+    destination_clean = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", destination_clean)
+    destination_clean = re.sub(r"\s+", " ", destination_clean).strip(" ,;")
+    return destination_clean
+
+
 def extract_prevalent_destination(value: object) -> str:
     if pd.isna(value):
         return NULL_VALUE
@@ -126,19 +136,17 @@ def extract_prevalent_destination(value: object) -> str:
 
     days_by_destination: dict[str, int] = {}
     first_position: dict[str, int] = {}
-    pair_pattern = re.compile(r"\s*([^,;][^,;]*?)\s*,\s*([0-9]+(?:[.,][0-9]+)?)\s*(?=;|,|$)")
+    pair_pattern = re.compile(
+        r"\s*([^\d,;:][^,;:]*?)\s*(?:,+\s*|:\s*|\s*)?([0-9]+(?:[.,][0-9]+)?)\s*(?=;|,|:|$)"
+    )
 
-    # Ogni coppia finisce sul numero giorni; accettiamo sia ';' sia ',' come separatore tra coppie.
+    # Ogni coppia finisce sul numero giorni; tollera separatori non standard tra coppie.
     matches = list(pair_pattern.finditer(raw_text))
     for idx, match in enumerate(matches):
         destination_raw = match.group(1).strip()
         days_raw = match.group(2).strip()
 
-        # Esclude il testo tra parentesi nel nome localita (frazione/area).
-        destination_clean = re.sub(r"\s*\([^)]*\)\s*", " ", destination_raw)
-        # Rimuove eventuali prefissi di indice dovuti a formattazioni errate (es. "0: PALAU").
-        destination_clean = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", destination_clean)
-        destination_clean = re.sub(r"\s+", " ", destination_clean).strip()
+        destination_clean = clean_destination_name(destination_raw)
         if not destination_clean:
             continue
 
@@ -151,7 +159,7 @@ def extract_prevalent_destination(value: object) -> str:
             continue
 
         days_int = int(days_float)
-        if days_int <= 0:
+        if days_int < 0:
             continue
 
         destination_key = destination_clean.upper()
@@ -160,6 +168,11 @@ def extract_prevalent_destination(value: object) -> str:
         days_by_destination[destination_key] = days_by_destination.get(destination_key, 0) + days_int
 
     if not days_by_destination:
+        # Caso limite: una sola localita senza numero giorni (es. "CAGLIARI").
+        if ";" not in raw_text and not re.search(r"\d", raw_text):
+            single_destination = clean_destination_name(raw_text)
+            if single_destination:
+                return single_destination.upper()
         return NULL_VALUE
 
     prevalent_destination = min(
@@ -167,6 +180,19 @@ def extract_prevalent_destination(value: object) -> str:
         key=lambda k: (-days_by_destination[k], first_position[k], k),
     )
     return prevalent_destination
+
+
+def build_undefined_prevalent_destination_questionnaires(
+    df: pd.DataFrame,
+    destinazione_prevalente: pd.Series,
+) -> pd.DataFrame:
+    undefined_mask = destinazione_prevalente == NULL_VALUE
+    undefined_rows = df.loc[undefined_mask].copy()
+    undefined_rows.insert(0, "riga_excel_origine", undefined_rows.index + 2)
+    undefined_rows.insert(1, "destinazione_prevalente", UNDEFINED_LABEL)
+
+    source_columns = [c for c in df.columns if c != "numero_componenti_num"]
+    return undefined_rows[["riga_excel_origine", "destinazione_prevalente", *source_columns]]
 
 
 def build_visual_report(out: pd.DataFrame) -> pd.DataFrame:
@@ -335,7 +361,7 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
         dimensione_1="luogo_somministrazione",
     )
 
-    # 4) Suddivisione: pernottanti (con/senza pacchetto), escursionisti, crocieristi
+    # 4) Suddivisione: pernottanti (con/senza pacchetto), crocieristi
     sist = df["tipologia_sistemazione"]
     pacchetto = normalize_text_series(df["pacchetto"])
 
@@ -345,17 +371,14 @@ def build_analysis_table(df: pd.DataFrame, *, include_analysis_7: bool) -> tuple
     n_crocieristi = int(is_crocierista.sum())
     n_pernottanti_con = int((~is_crocierista & is_con_pacchetto).sum())
     n_pernottanti_senza = int((~is_crocierista & ~is_con_pacchetto).sum())
-    n_escursionisti = 0
 
     c_crocieristi = int(df.loc[is_crocierista, "numero_componenti_num"].sum())
     c_pernottanti_con = int(df.loc[(~is_crocierista & is_con_pacchetto), "numero_componenti_num"].sum())
     c_pernottanti_senza = int(df.loc[(~is_crocierista & ~is_con_pacchetto), "numero_componenti_num"].sum())
-    c_escursionisti = 0
 
     cat4 = [
         ("Pernottanti - Con pacchetto", n_pernottanti_con, c_pernottanti_con),
         ("Pernottanti - Senza pacchetto", n_pernottanti_senza, c_pernottanti_senza),
-        ("Escursionisti", n_escursionisti, c_escursionisti),
         ("Crocieristi", n_crocieristi, c_crocieristi),
     ]
     for label, questionari_int, componenti_int in cat4:
@@ -527,6 +550,11 @@ def main() -> None:
             df[col] = normalize_case_insensitive_series(df[col])
 
     df["numero_componenti_num"] = pd.to_numeric(df["numero_componenti"], errors="coerce").fillna(0)
+    destinazione_prevalente = df["località_visitate"].apply(extract_prevalent_destination)
+    questionari_destinazione_non_definita = build_undefined_prevalent_destination_questionnaires(
+        df,
+        destinazione_prevalente,
+    )
 
     out_totale, total_questionari, total_componenti = build_analysis_table(df, include_analysis_7=True)
     report_totale = build_visual_report(out_totale)
@@ -557,10 +585,38 @@ def main() -> None:
             f"{saved_path}"
         )
 
+    undefined_saved_path = OUTPUT_UNDEFINED_DESTINATIONS_FILE
+    try:
+        with pd.ExcelWriter(undefined_saved_path, engine="openpyxl") as writer:
+            questionari_destinazione_non_definita.to_excel(
+                writer,
+                sheet_name="questionari_non_definiti",
+                index=False,
+            )
+    except PermissionError:
+        undefined_saved_path = OUTPUT_UNDEFINED_DESTINATIONS_FILE.with_name(
+            f"{OUTPUT_UNDEFINED_DESTINATIONS_FILE.stem}_nuovo{OUTPUT_UNDEFINED_DESTINATIONS_FILE.suffix}"
+        )
+        with pd.ExcelWriter(undefined_saved_path, engine="openpyxl") as writer:
+            questionari_destinazione_non_definita.to_excel(
+                writer,
+                sheet_name="questionari_non_definiti",
+                index=False,
+            )
+        print(
+            "File dei questionari con localita prevalente non definita in uso: "
+            f"salvato su file alternativo {undefined_saved_path}"
+        )
+
     print(f"Output generato: {saved_path}")
+    print(f"Output questionari localita prevalente non definita: {undefined_saved_path}")
     print(f"Righe report totale: {len(report_totale)}")
     print(f"Righe report ITALIANI: {len(report_italiani)}")
     print(f"Righe report STRANIERI: {len(report_stranieri)}")
+    print(
+        "Questionari con localita prevalente non definita: "
+        f"{len(questionari_destinazione_non_definita)}"
+    )
     print(f"Totale questionari: {total_questionari}")
     print(f"Totale componenti: {total_componenti}")
 
