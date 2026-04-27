@@ -140,12 +140,27 @@ def build_duration_class(duration_num_series: pd.Series) -> pd.Series:
     return out
 
 
-def compute_age_bands_common(df: pd.DataFrame, *, group_col: str, group_values: list[str]) -> list[str]:
+def build_sampling_age_band(series: pd.Series, *, merge_56_65_over65: bool) -> pd.Series:
+    out = series.astype("string").fillna("").str.strip().str.upper()
+    if not merge_56_65_over65:
+        return out
+
+    merge_values = {"56-65", "OVER 65"}
+    return out.mask(out.isin(merge_values), "56-OVER65")
+
+
+def compute_age_bands_common(
+    df: pd.DataFrame,
+    *,
+    group_col: str,
+    group_values: list[str],
+    age_col: str = ETA_COL,
+) -> list[str]:
     age_sets: list[set[str]] = []
     for group in group_values:
         group_df = df[df[group_col] == group]
-        grouped = group_df.groupby(ETA_COL, as_index=False).agg(componenti=("_componenti_num", "sum"))
-        valid_ages = {str(r[ETA_COL]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0}
+        grouped = group_df.groupby(age_col, as_index=False).agg(componenti=("_componenti_num", "sum"))
+        valid_ages = {str(r[age_col]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0}
         if not valid_ages:
             raise ValueError(f"Nessuna fascia eta disponibile per gruppo {group}.")
         age_sets.append(valid_ages)
@@ -164,11 +179,12 @@ def build_cell_plan(
     group_col: str,
     group_values: list[str],
     age_bands: list[str],
+    age_col: str = ETA_COL,
 ) -> list[CellPlan]:
     plans: list[CellPlan] = []
     for group in group_values:
         for age_band in age_bands:
-            cell = df[(df[group_col] == group) & (df[ETA_COL] == age_band)]
+            cell = df[(df[group_col] == group) & (df[age_col] == age_band)]
             available_components = float(cell["_componenti_num"].sum())
             available_questionari = int(len(cell))
             plans.append(
@@ -324,13 +340,27 @@ def extract_sample(
     group_values: list[str],
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    age_bands = compute_age_bands_common(df, group_col=group_col, group_values=group_values)
+    work = df.copy()
+    work["_fascia_eta_sampling"] = build_sampling_age_band(
+        work[ETA_COL],
+        merge_56_65_over65=merge_56_65_over65,
+    )
+    age_col = "_fascia_eta_sampling"
+
+    age_bands = compute_age_bands_common(
+        work,
+        group_col=group_col,
+        group_values=group_values,
+        age_col=age_col,
+    )
     cell_plan = build_cell_plan(
-        df,
+        work,
         group_col=group_col,
         group_values=group_values,
         age_bands=age_bands,
+        age_col=age_col,
     )
 
     target_components = min(cell.available_components for cell in cell_plan)
@@ -341,7 +371,7 @@ def extract_sample(
     selection_rows: list[dict[str, object]] = []
 
     for cell in cell_plan:
-        cell_df = df[(df[group_col] == cell.group_value) & (df[ETA_COL] == cell.fascia_eta)]
+        cell_df = work[(work[group_col] == cell.group_value) & (work[age_col] == cell.fascia_eta)]
         if cell.available_components < target_components - 1e-9:
             raise ValueError(
                 f"Capacita insufficiente per {sample_name} nella cella {cell.group_value} x {cell.fascia_eta}."
@@ -377,13 +407,13 @@ def extract_sample(
     else:
         final_idx = pd.Index([], dtype="int64")
 
-    selected = df.loc[final_idx].copy()
+    selected = work.loc[final_idx].copy()
     selected["campione"] = sample_name
     selected["dimensione_gruppo"] = group_col
 
     selected[group_col] = selected[group_col].astype("string")
     selected["strato_gruppo"] = selected[group_col].astype("string")
-    selected["strato_fascia_eta"] = selected[ETA_COL].astype("string")
+    selected["strato_fascia_eta"] = selected[age_col].astype("string")
 
     selected = selected.sort_values(by=["strato_gruppo", "strato_fascia_eta", "_id_text", "_row_order"], kind="mergesort")
 
@@ -392,6 +422,7 @@ def extract_sample(
         "campione": sample_name,
         "n_gruppi": len(group_values),
         "n_fasce_eta": len(age_bands),
+        "merge_56_65_over65": bool(merge_56_65_over65),
         "target_componenti_per_cella": format_number(target_components),
         "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
         "questionari_totali_selezionati": int(len(selected)),
@@ -404,6 +435,7 @@ def build_sample_1(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[df["macro_provenienza"].isin(["ITALIANI", "STRANIERI"])].copy()
     if subset.empty:
@@ -417,6 +449,7 @@ def build_sample_1(
         group_values=group_values,
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
 
     selected_components = (
@@ -438,6 +471,7 @@ def build_sample_1a(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[
         df["macro_provenienza"].isin(["ITALIANI", "STRANIERI"])
@@ -454,6 +488,7 @@ def build_sample_1a(
         group_values=["ITALIANI", "STRANIERI"],
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
     return selected, cell_summary, meta
 
@@ -463,6 +498,7 @@ def build_sample_1b(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[
         df["macro_provenienza"].isin(["ITALIANI", "STRANIERI"])
@@ -478,6 +514,7 @@ def build_sample_1b(
         group_values=["ITALIANI", "STRANIERI"],
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
     return selected, cell_summary, meta
 
@@ -575,6 +612,7 @@ def build_sample_1d(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[
         df["macro_provenienza"].isin(["ITALIANI", "STRANIERI"])
@@ -593,6 +631,7 @@ def build_sample_1d(
         group_values=["ITALIANI", "STRANIERI"],
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
     meta["top5_motivazioni_principali"] = ", ".join(top5)
     return selected, cell_summary, meta
@@ -603,6 +642,7 @@ def build_sample_2(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[(df[STATO_COL] != NULL_VALUE) & (df[STATO_COL] != "ITALIA")].copy()
     if subset.empty:
@@ -618,6 +658,7 @@ def build_sample_2(
         group_values=top5,
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
     meta["top5"] = ", ".join(top5)
     return selected, cell_summary, meta
@@ -628,6 +669,7 @@ def build_sample_3(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[(df[STATO_COL] == "ITALIA") & (df[REGIONE_COL] != NULL_VALUE)].copy()
     if subset.empty:
@@ -643,23 +685,25 @@ def build_sample_3(
         group_values=top5,
         rng=rng,
         selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
     )
     meta["top5"] = ", ".join(top5)
     return selected, cell_summary, meta
 
 
 def split_output_columns(df_selected: pd.DataFrame, original_columns: list[str]) -> pd.DataFrame:
-    extra_cols = [
-        "campione",
-        "dimensione_gruppo",
-        "strato_gruppo",
-        "strato_fascia_eta",
-    ]
     existing_original = [c for c in original_columns if c in df_selected.columns]
-    return df_selected[extra_cols + existing_original].copy()
+    return df_selected[existing_original].copy()
 
 
-def run(input_file: Path, output_file: Path, *, seed: int | None, selection_trials: int) -> Path:
+def run(
+    input_file: Path,
+    output_file: Path,
+    *,
+    seed: int | None,
+    selection_trials: int,
+    merge_56_65_over65: bool,
+) -> Path:
     if not input_file.exists():
         raise FileNotFoundError(f"File input non trovato: {input_file}")
 
@@ -676,13 +720,43 @@ def run(input_file: Path, output_file: Path, *, seed: int | None, selection_tria
 
     rng = random.Random(seed)
 
-    sample_1_df, sample_1_diag, sample_1_meta = build_sample_1(eligible, rng=rng, selection_trials=selection_trials)
-    sample_1a_df, sample_1a_diag, sample_1a_meta = build_sample_1a(sample_1_df, rng=rng, selection_trials=selection_trials)
-    sample_1b_df, sample_1b_diag, sample_1b_meta = build_sample_1b(sample_1_df, rng=rng, selection_trials=selection_trials)
+    sample_1_df, sample_1_diag, sample_1_meta = build_sample_1(
+        eligible,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
+    sample_1a_df, sample_1a_diag, sample_1a_meta = build_sample_1a(
+        sample_1_df,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
+    sample_1b_df, sample_1b_diag, sample_1b_meta = build_sample_1b(
+        sample_1_df,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
     sample_1c_df, sample_1c_diag, sample_1c_meta = build_sample_1c(sample_1_df, rng=rng, selection_trials=selection_trials)
-    sample_1d_df, sample_1d_diag, sample_1d_meta = build_sample_1d(sample_1_df, rng=rng, selection_trials=selection_trials)
-    sample_2_df, sample_2_diag, sample_2_meta = build_sample_2(eligible, rng=rng, selection_trials=selection_trials)
-    sample_3_df, sample_3_diag, sample_3_meta = build_sample_3(eligible, rng=rng, selection_trials=selection_trials)
+    sample_1d_df, sample_1d_diag, sample_1d_meta = build_sample_1d(
+        sample_1_df,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
+    sample_2_df, sample_2_diag, sample_2_meta = build_sample_2(
+        eligible,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
+    sample_3_df, sample_3_diag, sample_3_meta = build_sample_3(
+        eligible,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
 
     diagnostics = pd.concat(
         [
@@ -707,6 +781,7 @@ def run(input_file: Path, output_file: Path, *, seed: int | None, selection_tria
         },
         {"chiave": "seed", "valore": "AUTO" if seed is None else seed},
         {"chiave": "selection_trials", "valore": int(selection_trials)},
+        {"chiave": "merge_56_65_over65", "valore": bool(merge_56_65_over65)},
     ]
 
     for sample_meta in [
@@ -788,9 +863,20 @@ def main() -> None:
         default=DEFAULT_SELECTION_TRIALS,
         help="Numero tentativi casuali per cella (piu alto = piu varieta, piu lento)",
     )
+    parser.add_argument(
+        "--merge-56-65-over65",
+        action="store_true",
+        help="Aggrega la fascia 56-65 con OVER 65 durante la stratificazione",
+    )
     args = parser.parse_args()
 
-    run(args.input, args.output, seed=args.seed, selection_trials=args.selection_trials)
+    run(
+        args.input,
+        args.output,
+        seed=args.seed,
+        selection_trials=args.selection_trials,
+        merge_56_65_over65=args.merge_56_65_over65,
+    )
 
 
 if __name__ == "__main__":
