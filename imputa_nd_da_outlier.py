@@ -370,7 +370,7 @@ def run(input_file: Path, output_file: Path, sheet_name: str | None) -> None:
         )
         all_stats.append(stats)
 
-    for package_type, mask in (("A", mask_pacchetto_a), ("B", mask_pacchetto_b)):
+    for package_type, mask in (("A", mask_pacchetto_a), ("B", mask_pacchetto_b), ("C", mask_pacchetto_c)):
         stats = impute_column_for_subset(
             df=df,
             ws=ws,
@@ -381,10 +381,6 @@ def run(input_file: Path, output_file: Path, sheet_name: str | None) -> None:
         )
         all_stats.append(stats)
 
-    c_subset = df.loc[mask_pacchetto_c]
-    c_nd_mask = c_subset[SPESA_PACCHETTO_COL].map(is_null_like) if not c_subset.empty else pd.Series(dtype=bool)
-    c_weights = df.loc[c_subset.index, "_turisti_weight"] if not c_subset.empty else pd.Series(dtype=float)
-
     wb.save(output_file)
 
     print(f"Input letto: {input_file}")
@@ -393,7 +389,7 @@ def run(input_file: Path, output_file: Path, sheet_name: str | None) -> None:
     print("- non pacchetto: donor pool solo non pacchetto")
     print("- pacchetto A: donor pool solo A")
     print("- pacchetto B: donor pool solo B")
-    print("- pacchetto C: non imputato")
+    print("- pacchetto C: donor pool solo C")
     print("- celle imputate: sfondo giallo pastello")
     print("Dettaglio imputazione ND:")
     for s in all_stats:
@@ -407,11 +403,6 @@ def run(input_file: Path, output_file: Path, sheet_name: str | None) -> None:
             f"nd_residui_pesati={s.nd_remaining_weight}"
         )
 
-    print(
-        "- pernottanti_con_pacchetto_C | spesa_pacchetto: "
-        f"nd_righe_non_imputati={int(c_nd_mask.sum())}, "
-        f"nd_pesati_non_imputati={weighted_count(c_nd_mask, c_weights) if not c_subset.empty else 0}"
-    )
     print(f"Output generato: {output_file}")
 
 
@@ -419,8 +410,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Imputazione ND post-outlier su workbook completo: "
-            "non-pacchetto usa donor non-pacchetto; pacchetto A/B usa donor dello stesso tipo; "
-            "pacchetto C escluso. Celle imputate evidenziate in giallo pastello."
+            "non-pacchetto usa donor non-pacchetto; pacchetto A/B/C usa donor dello stesso tipo."
         )
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="File Excel sorgente")
