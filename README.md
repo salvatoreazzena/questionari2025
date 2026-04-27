@@ -117,6 +117,10 @@ python estrai_sottocampioni.py --input questionari_fonte_veri_outlier_sostituiti
 #### Campioni prodotti
 
 - `campione_1`: 50% italiani e 50% stranieri, distribuiti nelle fasce d'eta comuni ai due gruppi.
+- `campione_1a`: turisti non balneari (`motivazione_principale != BALNEARE`), mantenendo 50/50 italiani-stranieri e fasce d'eta.
+- `campione_1b`: turisti con `motivazione_secondaria` valorizzata, mantenendo 50/50 italiani-stranieri e fasce d'eta.
+- `campione_1c`: turisti con `durata_soggiorno <= 30`, suddivisi nelle classi durata `1-3`, `4-7`, `8-14`, `15-30`, mantenendo 50/50 italiani-stranieri.
+- `campione_1d`: turisti con top 5 `motivazione_principale` (ranking per `numero_componenti`), mantenendo 50/50 italiani-stranieri e fasce d'eta.
 - `campione_2`: top 5 paesi esteri (ranking per `numero_componenti`) x fasce d'eta comuni.
 - `campione_3`: top 5 regioni italiane (ranking per `numero_componenti`) x fasce d'eta comuni.
 
@@ -125,6 +129,10 @@ python estrai_sottocampioni.py --input questionari_fonte_veri_outlier_sostituiti
 - File Excel: `questionari_sottocampioni.xlsx`
 - Fogli:
 	- `campione_1`
+	- `campione_1a`
+	- `campione_1b`
+	- `campione_1c`
+	- `campione_1d`
 	- `campione_2`
 	- `campione_3`
 	- `diagnostica_celle` (disponibili, target, selezionati e overshoot per ogni cella)
