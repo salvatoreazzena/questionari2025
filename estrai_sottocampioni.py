@@ -25,6 +25,9 @@ NULL_VALUE = "NULL"
 NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A."}
 BALNEARE_VALUE = "BALNEARE"
 
+SAMPLE_2_COUNTRIES = ["GERMANIA", "FRANCIA", "SPAGNA", "REGNO UNITO", "USA", "SVIZZERA", "POLONIA"]
+SAMPLE_3_REGIONS = ["LOMBARDIA", "LAZIO", "EMILIA-ROMAGNA", "TOSCANA", "PIEMONTE", "VENETO"]
+
 REQUIRED_COLUMNS = [
     DURATION_COL,
     PACCHETTO_COL,
@@ -261,6 +264,46 @@ def select_cell_rows_with_optimal_deviation(
 ) -> tuple[pd.Index, float]:
     if target_components <= 0:
         return pd.Index([], dtype="int64"), 0.0
+
+    # Prima prova combinatoria esatta (quando i componenti sono interi):
+    # evita undershoot/overshoot evitabili dovuti a selezione per prefissi.
+    component_values = [float(v) for v in cell_df["_componenti_num"].tolist()]
+    if component_values and is_integer_like(target_components) and all(is_integer_like(v) for v in component_values):
+        target_int = int(round(target_components))
+        values_int = [int(round(v)) for v in component_values]
+        max_value = max(values_int)
+        upper_bound = target_int + max_value
+
+        parent: dict[int, tuple[int, int] | None] = {0: None}
+        for pos, val in enumerate(values_int):
+            current_sums = sorted(parent.keys(), reverse=True)
+            for s in current_sums:
+                new_sum = s + val
+                if new_sum > upper_bound:
+                    continue
+                if new_sum not in parent:
+                    parent[new_sum] = (s, pos)
+
+        if len(parent) > 1:
+            best_sum = min(
+                parent.keys(),
+                key=lambda s: (abs(s - target_int), max(s - target_int, 0), -s),
+            )
+            if best_sum > 0:
+                chosen_pos: list[int] = []
+                cursor = best_sum
+                while cursor != 0:
+                    prev = parent.get(cursor)
+                    if prev is None:
+                        break
+                    prev_sum, pos = prev
+                    chosen_pos.append(pos)
+                    cursor = prev_sum
+                chosen_pos.reverse()
+
+                idx_values = cell_df.index.tolist()
+                chosen_idx = [int(idx_values[p]) for p in chosen_pos]
+                return pd.Index(chosen_idx, dtype="int64"), float(best_sum)
 
     best_idx = pd.Index([], dtype="int64")
     best_total = 0.0
@@ -524,29 +567,42 @@ def build_sample_1c(
     *,
     rng: random.Random,
     selection_trials: int,
+    merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     subset = df[df["macro_provenienza"].isin(["ITALIANI", "STRANIERI"]) & (df["_durata_num"] <= 30)].copy()
     subset["classe_durata_30"] = build_duration_class(subset["_durata_num"])
+    subset["_fascia_eta_sampling"] = build_sampling_age_band(
+        subset[ETA_COL],
+        merge_56_65_over65=merge_56_65_over65,
+    )
     subset = subset[subset["classe_durata_30"].notna()].copy()
     if subset.empty:
         raise ValueError("Campione 1c non costruibile: nessun turista nelle classi durata 1-30 giorni.")
 
     duration_classes = ["1-3", "4-7", "8-14", "15-30"]
+    age_bands = compute_age_bands_common(
+        subset,
+        group_col="macro_provenienza",
+        group_values=["ITALIANI", "STRANIERI"],
+        age_col="_fascia_eta_sampling",
+    )
     cell_plan: list[CellPlan] = []
     for group in ["ITALIANI", "STRANIERI"]:
         for duration_class in duration_classes:
-            cell = subset[
-                (subset["macro_provenienza"] == group)
-                & (subset["classe_durata_30"] == duration_class)
-            ]
-            cell_plan.append(
-                CellPlan(
-                    group_value=group,
-                    fascia_eta=duration_class,
-                    available_components=float(cell["_componenti_num"].sum()),
-                    available_questionari=int(len(cell)),
+            for age_band in age_bands:
+                cell = subset[
+                    (subset["macro_provenienza"] == group)
+                    & (subset["classe_durata_30"] == duration_class)
+                    & (subset["_fascia_eta_sampling"] == age_band)
+                ]
+                cell_plan.append(
+                    CellPlan(
+                        group_value=group,
+                        fascia_eta=f"{duration_class}|{age_band}",
+                        available_components=float(cell["_componenti_num"].sum()),
+                        available_questionari=int(len(cell)),
+                    )
                 )
-            )
 
     target_components = min(cell.available_components for cell in cell_plan)
     if target_components <= 0:
@@ -556,9 +612,11 @@ def build_sample_1c(
     selection_rows: list[dict[str, object]] = []
 
     for cell in cell_plan:
+        duration_class, age_band = str(cell.fascia_eta).split("|", 1)
         cell_df = subset[
             (subset["macro_provenienza"] == cell.group_value)
-            & (subset["classe_durata_30"] == cell.fascia_eta)
+            & (subset["classe_durata_30"] == duration_class)
+            & (subset["_fascia_eta_sampling"] == age_band)
         ]
         selected_idx, selected_components = select_cell_rows_with_optimal_deviation(
             cell_df,
@@ -573,7 +631,8 @@ def build_sample_1c(
                 "campione": "Campione_1c_durata_1_30",
                 "dimensione_gruppo": "macro_provenienza",
                 "valore_gruppo": cell.group_value,
-                "fascia_eta": cell.fascia_eta,
+                "classe_durata": duration_class,
+                "fascia_eta": age_band,
                 "componenti_disponibili": format_number(cell.available_components),
                 "questionari_disponibili": cell.available_questionari,
                 "target_componenti": format_number(target_components),
@@ -591,15 +650,22 @@ def build_sample_1c(
     selected["campione"] = "Campione_1c_durata_1_30"
     selected["dimensione_gruppo"] = "macro_provenienza"
     selected["strato_gruppo"] = selected["macro_provenienza"].astype("string")
-    selected["strato_fascia_eta"] = selected["classe_durata_30"].astype("string")
-    selected = selected.sort_values(by=["strato_gruppo", "strato_fascia_eta", "_id_text", "_row_order"], kind="mergesort")
+    selected["strato_classe_durata"] = selected["classe_durata_30"].astype("string")
+    selected["strato_fascia_eta"] = selected["_fascia_eta_sampling"].astype("string")
+    selected = selected.sort_values(
+        by=["strato_gruppo", "strato_classe_durata", "strato_fascia_eta", "_id_text", "_row_order"],
+        kind="mergesort",
+    )
 
     cell_summary = pd.DataFrame(selection_rows)
     meta = {
         "campione": "Campione_1c_durata_1_30",
         "n_gruppi": 2,
         "n_classi_durata": len(duration_classes),
+        "n_fasce_eta": len(age_bands),
         "classi_durata": ", ".join(duration_classes),
+        "fasce_eta": ", ".join(age_bands),
+        "merge_56_65_over65": bool(merge_56_65_over65),
         "target_componenti_per_cella": format_number(target_components),
         "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
         "questionari_totali_selezionati": int(len(selected)),
@@ -627,8 +693,8 @@ def build_sample_1d(
     selected, cell_summary, meta = extract_sample(
         subset,
         sample_name="Campione_1d_top5_motivazioni",
-        group_col="macro_provenienza",
-        group_values=["ITALIANI", "STRANIERI"],
+        group_col=MOTIV_PRINC_COL,
+        group_values=top5,
         rng=rng,
         selection_trials=selection_trials,
         merge_56_65_over65=merge_56_65_over65,
@@ -644,23 +710,26 @@ def build_sample_2(
     selection_trials: int,
     merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    subset = df[(df[STATO_COL] != NULL_VALUE) & (df[STATO_COL] != "ITALIA")].copy()
+    subset = df[df[STATO_COL].isin(SAMPLE_2_COUNTRIES)].copy()
     if subset.empty:
         raise ValueError("Campione 2 non costruibile: nessun paese estero disponibile.")
 
-    top5 = compute_group_ranking(subset, STATO_COL, top_n=5)
-    subset = subset[subset[STATO_COL].isin(top5)].copy()
+    required = set(SAMPLE_2_COUNTRIES)
+    present = set(subset[STATO_COL].dropna().astype("string").tolist())
+    missing = sorted(required - present)
+    if missing:
+        raise ValueError(f"Campione 2 non costruibile: paesi mancanti {missing}")
 
     selected, cell_summary, meta = extract_sample(
         subset,
         sample_name="Campione_2_top5_paesi",
         group_col=STATO_COL,
-        group_values=top5,
+        group_values=SAMPLE_2_COUNTRIES,
         rng=rng,
         selection_trials=selection_trials,
         merge_56_65_over65=merge_56_65_over65,
     )
-    meta["top5"] = ", ".join(top5)
+    meta["top5"] = ", ".join(SAMPLE_2_COUNTRIES)
     return selected, cell_summary, meta
 
 
@@ -671,23 +740,26 @@ def build_sample_3(
     selection_trials: int,
     merge_56_65_over65: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    subset = df[(df[STATO_COL] == "ITALIA") & (df[REGIONE_COL] != NULL_VALUE)].copy()
+    subset = df[(df[STATO_COL] == "ITALIA") & (df[REGIONE_COL].isin(SAMPLE_3_REGIONS))].copy()
     if subset.empty:
         raise ValueError("Campione 3 non costruibile: nessuna regione italiana disponibile.")
 
-    top5 = compute_group_ranking(subset, REGIONE_COL, top_n=5)
-    subset = subset[subset[REGIONE_COL].isin(top5)].copy()
+    required = set(SAMPLE_3_REGIONS)
+    present = set(subset[REGIONE_COL].dropna().astype("string").tolist())
+    missing = sorted(required - present)
+    if missing:
+        raise ValueError(f"Campione 3 non costruibile: regioni mancanti {missing}")
 
     selected, cell_summary, meta = extract_sample(
         subset,
         sample_name="Campione_3_top5_regioni",
         group_col=REGIONE_COL,
-        group_values=top5,
+        group_values=SAMPLE_3_REGIONS,
         rng=rng,
         selection_trials=selection_trials,
         merge_56_65_over65=merge_56_65_over65,
     )
-    meta["top5"] = ", ".join(top5)
+    meta["top5"] = ", ".join(SAMPLE_3_REGIONS)
     return selected, cell_summary, meta
 
 
@@ -738,7 +810,12 @@ def run(
         selection_trials=selection_trials,
         merge_56_65_over65=merge_56_65_over65,
     )
-    sample_1c_df, sample_1c_diag, sample_1c_meta = build_sample_1c(sample_1_df, rng=rng, selection_trials=selection_trials)
+    sample_1c_df, sample_1c_diag, sample_1c_meta = build_sample_1c(
+        sample_1_df,
+        rng=rng,
+        selection_trials=selection_trials,
+        merge_56_65_over65=merge_56_65_over65,
+    )
     sample_1d_df, sample_1d_diag, sample_1d_meta = build_sample_1d(
         sample_1_df,
         rng=rng,
@@ -863,11 +940,6 @@ def main() -> None:
         default=DEFAULT_SELECTION_TRIALS,
         help="Numero tentativi casuali per cella (piu alto = piu varieta, piu lento)",
     )
-    parser.add_argument(
-        "--merge-56-65-over65",
-        action="store_true",
-        help="Aggrega la fascia 56-65 con OVER 65 durante la stratificazione",
-    )
     args = parser.parse_args()
 
     run(
@@ -875,7 +947,7 @@ def main() -> None:
         args.output,
         seed=args.seed,
         selection_trials=args.selection_trials,
-        merge_56_65_over65=args.merge_56_65_over65,
+        merge_56_65_over65=True,
     )
 
 
