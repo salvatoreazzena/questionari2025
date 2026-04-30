@@ -62,37 +62,44 @@ JUDGMENT_SCORE_MAP = {
 }
 
 TEXT_SPLIT_RE = re.compile(r"[;,/|\n]+|\be\b|\bed\b|\by\b", flags=re.IGNORECASE)
+NEGATION_PATTERNS = [
+    r"\b(nulla|niente|nessuno|nessuna|no|non saprei|non so|na|nd|nr)\b",
+    r"\b(nulla da migliorare|niente da migliorare|va bene cosi|va bene cosi'|tutto bene|nessun miglioramento)\b",
+]
+WEB_NEGATION_PATTERNS = [
+    r"\b(non ho prenotato|nessuna prenotazione|non prenotato|non usato il web)\b",
+]
 
 WEB_THEME_PATTERNS: list[tuple[str, str]] = [
-    ("VOLO/AEREO", r"\b(volo|voli|aereo|flight|flights)\b"),
-    ("NAVE/TRAGHETTO", r"\b(nave|traghetto|traghetti|ferry|ferries)\b"),
-    ("ALLOGGIO", r"\b(alloggio|alloggi|hotel|b&b|bnb|appartamento|casa vacanz|vacanze|campeggio|residence|agriturismo|ostello)\b"),
-    ("AUTONOLEGGIO/TRASPORTI", r"\b(auto|autonoleggio|noleggio|scooter|moto|bus|autobus|treno|transfer|taxi)\b"),
-    ("ESCURSIONI/ATTIVITA", r"\b(escursion|gita|tour|barca|boat|attivit|esperienz|bigliett|ticket|muse|parc|visita)\b"),
-    ("RISTORANTI", r"\b(ristorant|pizzeria|cena|pranzo|food|colazione)\b"),
-    ("ATTREZZATURA MARE", r"\b(ombrellon|lettin|sdrai|attrezzatura per il mare)\b"),
+    ("VOLO/AEREO", r"\b(vol\w*|aere\w*|flight\w*)\b"),
+    ("NAVE/TRAGHETTO", r"\b(nav\w*|traghett\w*|ferr\w*)\b"),
+    ("ALLOGGIO", r"\b(allogg\w*|hotel\w*|b&b|appartament\w*|casa vacanz\w*|campegg\w*|residence\w*|agriturism\w*|ostell\w*)\b"),
+    ("AUTONOLEGGIO/TRASPORTI", r"\b(auto\b|nolegg\w*|scooter\w*|moto\w*|bus\w*|autobus\w*|tren\w*|transfer\w*|taxi\w*)\b"),
+    ("ESCURSIONI/ATTIVITA", r"\b(escursion\w*|git\w*|tour\w*|barc\w*|boat\w*|attivit\w*|esperienz\w*|bigliett\w*|ticket\w*|muse\w*|parc\w*|visit\w*)\b"),
+    ("RISTORANTI", r"\b(ristor\w*|pizzeri\w*|cen\w*|pranz\w*|food\w*|colazion\w*)\b"),
+    ("ATTREZZATURA MARE", r"\b(ombrellon\w*|lettin\w*|sdrai\w*|attrezzatura per il mare)\b"),
 ]
 
 THEME_PATTERNS: list[tuple[str, str]] = [
-    ("MARE/SPIAGGE", r"\b(mare|spiagg|acqua|costa|litorale)\b"),
-    ("NATURA/PAESAGGIO", r"\b(natura|paesagg|panorama|montagna|parco|verde)\b"),
-    ("CLIMA", r"\b(clima|tempo|meteo)\b"),
-    ("OSPITALITA/ACCOGLIENZA", r"\b(ospital|accoglien|gentilezza|cordial|persone)\b"),
-    ("CIBO/ENOGASTRONOMIA", r"\b(cibo|cucina|ristor|mangiare|enogastr|gastron|food)\b"),
-    ("TRANQUILLITA/RELAX", r"\b(tranquill|relax|silenz|pace|calma)\b"),
-    ("DIVERTIMENTO/VITA NOTTURNA", r"\b(divert|movida|locali|notturn|serate|mojito)\b"),
-    ("CULTURA/BORGHI", r"\b(cultura|muse|storia|borg|artist|architett)\b"),
+    ("MARE/SPIAGGE", r"\b(mar\w*|spiagg\w*|acqu\w*|cost\w*|litoral\w*|cal\w*)\b"),
+    ("NATURA/PAESAGGIO", r"\b(natur\w*|paesagg\w*|panoram\w*|montagn\w*|parc\w*|verd\w*)\b"),
+    ("CLIMA", r"\b(clim\w*|meteo\w*|tempo\b)\b"),
+    ("OSPITALITA/ACCOGLIENZA", r"\b(ospitalit\w*|ospital\w*|accoglien\w*|gentilezz\w*|cordial\w*)\b"),
+    ("CIBO/ENOGASTRONOMIA", r"\b(cib\w*|cucin\w*|ristor\w*|mang\w*|enogastr\w*|gastron\w*|food\w*)\b"),
+    ("TRANQUILLITA/RELAX", r"\b(tranquill\w*|relax\w*|silenz\w*|pac\w*|calm\w*)\b"),
+    ("DIVERTIMENTO/VITA NOTTURNA", r"\b(divert\w*|movid\w*|local\w*|notturn\w*|serat\w*|mojito\w*)\b"),
+    ("CULTURA/BORGHI", r"\b(cultur\w*|muse\w*|stori\w*|borgh\w*|artist\w*|architett\w*)\b"),
 ]
 
 WEAKNESS_PATTERNS: list[tuple[str, str]] = [
-    ("VIABILITA/STRADE", r"\b(strad|viabil|cantier|asfalt)\b"),
-    ("TRASPORTI/COLLEGAMENTI", r"\b(collegament|trasport|autobus|bus|treno|voli dirett|traghett|aere[io]|taxi|mezzi)\b"),
-    ("PARCHEGGI", r"\b(parchegg)\b"),
-    ("PREZZI/COSTI", r"\b(prezz|car[oi]|costi|troppo cost)\b"),
-    ("SERVIZI DIGITALI/INFORMAZIONI", r"\b(online|sito|app|informazioni|servizi)\b"),
-    ("PULIZIA/RIFIUTI", r"\b(pulizi|rifiut|cassonett|sporc)\b"),
-    ("SOVRAFFOLLAMENTO", r"\b(affoll|confusion|caos)\b"),
-    ("SPIAGGE/ACCESSIBILITA", r"\b(spiagg|access|accessibil|prenotazion)\b"),
+    ("VIABILITA/STRADE", r"\b(strad\w*|viabil\w*|cantier\w*|asfalt\w*)\b"),
+    ("TRASPORTI/COLLEGAMENTI", r"\b(collegament\w*|trasport\w*|autobus\w*|bus\w*|tren\w*|vol\w* dirett\w*|traghett\w*|aere\w*|taxi\w*|mezzi pubblici|mezz\w*)\b"),
+    ("PARCHEGGI", r"\b(parchegg\w*)\b"),
+    ("PREZZI/COSTI", r"\b(prezz\w*|car\w*|cost\w*)\b"),
+    ("SERVIZI DIGITALI/INFORMAZIONI", r"\b(online\w*|sit\w*|app\b|informazion\w*|servizi online|servizi digitali)\b"),
+    ("PULIZIA/RIFIUTI", r"\b(pulizi\w*|rifiut\w*|cassonett\w*|sporc\w*)\b"),
+    ("SOVRAFFOLLAMENTO", r"\b(affoll\w*|confusion\w*|caos\w*|tropp\w* turisti\w*)\b"),
+    ("SPIAGGE/ACCESSIBILITA", r"\b(spiagg\w*|access\w*|accessibil\w*|prenotazion\w*|barrier\w* architettonic\w*)\b"),
 ]
 
 STOPWORDS = {
@@ -101,6 +108,20 @@ STOPWORDS = {
     "e", "o", "the", "and", "to", "of", "is", "are", "non", "piu", "più", "molto", "molti", "molte",
     "nulla", "niente", "tutto", "tutti", "tutte", "same", "good", "nice", "very",
 }
+
+TEXT_NORMALIZATION_REPLACEMENTS = [
+    (r"\bb b\b", "b&b"),
+    (r"\bbnb\b", "b&b"),
+    (r"\bbed and breakfast\b", "b&b"),
+    (r"\bcasa vacanza\b", "casa vacanze"),
+    (r"\bcase vacanza\b", "casa vacanze"),
+    (r"\bautonoleggio\b", "noleggio auto"),
+    (r"\bauto noleggio\b", "noleggio auto"),
+    (r"\bvoli diretti\b", "voli diretti"),
+    (r"\bmezzi pubblici\b", "mezzi pubblici"),
+    (r"\bspiaggie\b", "spiagge"),
+    (r"\btranquilit[aà]\b", "tranquillita"),
+]
 
 
 def normalize_text_series(series: pd.Series) -> pd.Series:
@@ -135,6 +156,8 @@ def normalize_free_text(value: object) -> str:
     if upper in {token.upper() for token in NULL_TOKENS}:
         return ""
     text = strip_accents(raw.lower())
+    for pattern, repl in TEXT_NORMALIZATION_REPLACEMENTS:
+        text = re.sub(pattern, repl, text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -293,6 +316,15 @@ def classify_text_themes(text: str, patterns: list[tuple[str, str]], default_lab
     return [default_label]
 
 
+def is_negative_or_empty_text(text: str, *, extra_patterns: list[str] | None = None) -> bool:
+    if not text:
+        return True
+    patterns = list(NEGATION_PATTERNS)
+    if extra_patterns:
+        patterns.extend(extra_patterns)
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
 def split_text_fragments(text: str) -> list[str]:
     if not text:
         return []
@@ -305,6 +337,152 @@ def split_text_fragments(text: str) -> list[str]:
             continue
         fragments.append(cleaned)
     return fragments
+
+
+def deduplicate_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def classify_text_fragments(
+    text: str,
+    *,
+    patterns: list[tuple[str, str]],
+    default_label: str,
+    extra_negation_patterns: list[str] | None = None,
+) -> tuple[list[dict[str, str]], list[str], str]:
+    normalized = normalize_free_text(text)
+    if is_negative_or_empty_text(normalized, extra_patterns=extra_negation_patterns):
+        return [], [], normalized
+
+    fragments = split_text_fragments(normalized)
+    if not fragments:
+        fragments = [normalized]
+
+    audit_rows: list[dict[str, str]] = []
+    all_themes: list[str] = []
+
+    for fragment in fragments:
+        if is_negative_or_empty_text(fragment, extra_patterns=extra_negation_patterns):
+            continue
+        matches: list[tuple[str, str]] = []
+        for label, pattern in patterns:
+            match = re.search(pattern, fragment, flags=re.IGNORECASE)
+            if match:
+                matches.append((label, match.group(0)))
+        if not matches:
+            matches = [(default_label, "fallback")]
+        for label, keyword in matches:
+            audit_rows.append({"frammento": fragment, "tema": label, "keyword_attivante": keyword})
+            all_themes.append(label)
+
+    return audit_rows, deduplicate_preserve_order(all_themes), normalized
+
+
+def build_open_text_outputs(
+    df: pd.DataFrame,
+    *,
+    text_col: str,
+    group_cols: list[str],
+    patterns: list[tuple[str, str]],
+    default_label: str,
+    tema_col_name: str,
+    top_n: int,
+    audit_sheet_name: str,
+    summary_sheet_name: str,
+    fragments_sheet_name: str,
+    extra_audit_cols: list[str] | None = None,
+    extra_negation_patterns: list[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    extra_audit_cols = extra_audit_cols or []
+    audit_rows: list[dict[str, object]] = []
+    summary_rows: list[dict[str, object]] = []
+    fragment_rows: list[dict[str, object]] = []
+
+    for _, row in df.iterrows():
+        raw_text = prettify_value(row[text_col])
+        audit_fragments, response_themes, normalized = classify_text_fragments(
+            str(row[text_col]),
+            patterns=patterns,
+            default_label=default_label,
+            extra_negation_patterns=extra_negation_patterns,
+        )
+        if not normalized:
+            continue
+
+        base_audit = {
+            ID_COL: row[ID_COL],
+            "testo_originale": raw_text,
+            "testo_normalizzato": normalized,
+            "tema_primario": response_themes[0] if response_themes else UNDEFINED_LABEL,
+            "temi_tutti": " | ".join(response_themes) if response_themes else UNDEFINED_LABEL,
+        }
+        for col in group_cols + extra_audit_cols:
+            base_audit[col] = row[col]
+
+        if not audit_fragments:
+            audit_rows.append({**base_audit, "frammento": "", "tema": UNDEFINED_LABEL, "keyword_attivante": ""})
+            continue
+
+        for item in audit_fragments:
+            audit_rows.append({**base_audit, **item})
+
+        for theme in response_themes:
+            base = {col: row[col] for col in group_cols}
+            base.update({tema_col_name: theme, ID_COL: row[ID_COL]})
+            summary_rows.append(base)
+
+        seen_pairs: set[tuple[str, str]] = set()
+        for item in audit_fragments:
+            pair = (item["frammento"], item["tema"])
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            base = {col: row[col] for col in group_cols}
+            base.update({"frammento": item["frammento"], tema_col_name: item["tema"], ID_COL: row[ID_COL]})
+            fragment_rows.append(base)
+
+    audit_df = pd.DataFrame(audit_rows)
+    if audit_df.empty:
+        audit_df = pd.DataFrame(
+            columns=[ID_COL, *group_cols, *extra_audit_cols, "testo_originale", "testo_normalizzato", "frammento", "tema", "keyword_attivante", "tema_primario", "temi_tutti"]
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    if summary_df.empty:
+        summary_out = pd.DataFrame(columns=[*group_cols, tema_col_name, "questionari", "pct_su_gruppo"])
+    else:
+        summary_out = (
+            summary_df.groupby([*group_cols, tema_col_name], dropna=False, as_index=False)
+            .agg(questionari=(ID_COL, "nunique"))
+            .sort_values(
+                by=[*group_cols, "questionari", tema_col_name],
+                ascending=[True] * len(group_cols) + [False, True],
+                kind="mergesort",
+            )
+        )
+        summary_out = add_share_within_group(summary_out, group_cols)
+
+    fragment_df = pd.DataFrame(fragment_rows)
+    if fragment_df.empty:
+        fragment_out = pd.DataFrame(columns=[*group_cols, "frammento", tema_col_name, "questionari", "pct_su_gruppo"])
+    else:
+        fragment_out = (
+            fragment_df.groupby([*group_cols, "frammento", tema_col_name], dropna=False, as_index=False)
+            .agg(questionari=(ID_COL, "nunique"))
+            .sort_values(
+                by=[*group_cols, "questionari", "frammento"],
+                ascending=[True] * len(group_cols) + [False, True],
+                kind="mergesort",
+            )
+        )
+        fragment_out = fragment_out.groupby(group_cols, dropna=False, group_keys=False).head(top_n).reset_index(drop=True)
+        fragment_out = add_share_within_group(fragment_out, group_cols)
+
+    return {
+        audit_sheet_name: audit_df,
+        summary_sheet_name: summary_out,
+        fragments_sheet_name: fragment_out,
+    }
 
 
 def build_text_theme_table(
@@ -461,34 +639,20 @@ def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     outputs["web_prenotazione"] = add_share_within_group(web_usage, ["macro_provenienza"])
 
     web_yes = df[df["web_flag"] == "SI"].copy()
-    web_theme_rows: list[dict[str, object]] = []
-    for _, row in web_yes.iterrows():
-        text = normalize_free_text(row[WEB_DETAIL_COL])
-        themes = classify_text_themes(text, WEB_THEME_PATTERNS, "ALTRO/NON CLASSIFICATO")
-        for theme in themes:
-            web_theme_rows.append(
-                {
-                    "macro_provenienza": row["macro_provenienza"],
-                    "cosa_prenotata": theme,
-                    "ID": row[ID_COL],
-                }
-            )
-    web_theme_df = pd.DataFrame(web_theme_rows)
-    if web_theme_df.empty:
-        outputs["web_cosa_prenotata"] = pd.DataFrame(columns=["macro_provenienza", "cosa_prenotata", "questionari", "pct_su_gruppo"])
-    else:
-        web_theme_df = (
-            web_theme_df.groupby(["macro_provenienza", "cosa_prenotata"], as_index=False)
-            .agg(questionari=("ID", "nunique"))
-            .sort_values(by=["macro_provenienza", "questionari", "cosa_prenotata"], ascending=[True, False, True], kind="mergesort")
+    outputs.update(
+        build_open_text_outputs(
+            web_yes,
+            text_col=WEB_DETAIL_COL,
+            group_cols=["macro_provenienza"],
+            patterns=WEB_THEME_PATTERNS,
+            default_label="ALTRO/NON CLASSIFICATO",
+            tema_col_name="cosa_prenotata",
+            top_n=20,
+            audit_sheet_name="audit_web",
+            summary_sheet_name="web_cosa_prenotata",
+            fragments_sheet_name="web_dettagli_top20",
+            extra_negation_patterns=WEB_NEGATION_PATTERNS,
         )
-        outputs["web_cosa_prenotata"] = add_share_within_group(web_theme_df, ["macro_provenienza"])
-
-    outputs["web_dettagli_top20"] = build_text_fragment_table(
-        web_yes,
-        text_col=WEB_DETAIL_COL,
-        group_cols=["macro_provenienza"],
-        top_n=20,
     )
 
     travel_type = build_distribution(df, group_cols=["macro_provenienza"], value_col="tipo_turismo", include_components=True)
@@ -603,39 +767,37 @@ def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         .sort_values(by=["media_giudizio", "questionari", "destinazione_prevalente"], ascending=[False, False, True], kind="mergesort")
     )
 
-    outputs["punti_forza_temi"] = add_share_within_group(
-        build_text_theme_table(
+    outputs.update(
+        build_open_text_outputs(
             df,
             text_col=STRENGTHS_COL,
             group_cols=["macro_provenienza"],
             patterns=THEME_PATTERNS,
             default_label="ALTRO/NON CLASSIFICATO",
-        ),
-        ["macro_provenienza"],
-    )
-    outputs["punti_forza_top20"] = build_text_fragment_table(
-        df,
-        text_col=STRENGTHS_COL,
-        group_cols=["macro_provenienza"],
-        top_n=20,
+            tema_col_name="tema",
+            top_n=20,
+            audit_sheet_name="audit_apprezzamenti",
+            summary_sheet_name="punti_forza_temi",
+            fragments_sheet_name="punti_forza_top20",
+            extra_audit_cols=["destinazione_prevalente", PRIMARY_REASON_COL],
+        )
     )
 
     dissent_df = df[df["giudizio_norm"].isin(["SUFFICIENTE", "PESSIMO"])].copy()
-    outputs["dissenso_temi"] = add_share_within_group(
-        build_text_theme_table(
+    outputs.update(
+        build_open_text_outputs(
             dissent_df,
             text_col=WEAKNESSES_COL,
             group_cols=["macro_provenienza", "giudizio_norm"],
             patterns=WEAKNESS_PATTERNS,
             default_label="ALTRO/NON CLASSIFICATO",
-        ),
-        ["macro_provenienza", "giudizio_norm"],
-    )
-    outputs["dissenso_top20"] = build_text_fragment_table(
-        dissent_df,
-        text_col=WEAKNESSES_COL,
-        group_cols=["macro_provenienza", "giudizio_norm"],
-        top_n=20,
+            tema_col_name="tema",
+            top_n=20,
+            audit_sheet_name="audit_dissenso",
+            summary_sheet_name="dissenso_temi",
+            fragments_sheet_name="dissenso_top20",
+            extra_audit_cols=["destinazione_prevalente", PRIMARY_REASON_COL],
+        )
     )
     outputs["dissenso_dettaglio"] = dissent_df[
         [
