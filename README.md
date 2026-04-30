@@ -137,3 +137,52 @@ python estrai_sottocampioni.py --input questionari_fonte_veri_outlier_sostituiti
 	- `campione_3`
 	- `diagnostica_celle` (disponibili, target, selezionati e overshoot per ogni cella)
 	- `meta` (riepilogo run e parametri effettivi dei campioni)
+
+### 5) Analisi qualitative Campione 1
+
+File: `build_analisi_qualitative_campione1.py`
+
+Esecuzione default:
+
+```bash
+python3 build_analisi_qualitative_campione1.py
+```
+
+Esecuzione con percorsi espliciti:
+
+```bash
+python3 build_analisi_qualitative_campione1.py --input questionari_sottocampioni.xlsx --sheet campione_1 --output analisi_qualitative_campione_1.xlsx
+```
+
+#### Output prodotto
+
+- File Excel: `analisi_qualitative_campione_1.xlsx`
+- Fogli principali:
+	- `web_prenotazione`
+	- `web_cosa_prenotata`
+	- `stanziale_itinerante`
+	- `arrivi_x_destinazione`
+	- `alloggio_prevalente`
+	- `motivazione_x_alloggio`
+	- `dest_top10_provenienze`
+	- `dest_top_motivazioni`
+	- `spesa_futura_assoc`
+	- `top20_dest_x_motivaz`
+	- `motivaz_prim_second`
+	- `giudizio_distrib`
+	- `giudizio_top15_dest`
+	- `punti_forza_temi`
+	- `punti_forza_top20`
+	- `dissenso_temi`
+	- `dissenso_top20`
+	- `dissenso_dettaglio`
+
+#### Note metodologiche sintetiche
+
+- Distinzione italiani/stranieri costruita da `stato_provenienza`.
+- `destinazione_prevalente`: estratta con la stessa logica gia usata in `build_analisi_preliminare.py`.
+- `stanziale/itinerante`: una sola destinazione con giorni positivi vs piu destinazioni con giorni positivi.
+- `provenienza_associata`: regione per italiani, stato per stranieri.
+- `media_giudizio`: conversione `Pessimo=1`, `Sufficiente=2`, `Buono=3`, `Ottimo=4`.
+- Le categorie `NON DEFINITO` vengono mantenute nelle analisi distributive per preservare i totali del campione.
+- Le analisi su `web_specifica`, `apprezzamenti` e `miglioramenti` includono sia temi classificati per parola chiave sia top frammenti testuali piu frequenti.
