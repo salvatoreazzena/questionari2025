@@ -428,7 +428,7 @@ def build_open_text_outputs(
 
         for theme in response_themes:
             base = {col: row[col] for col in group_cols}
-            base.update({tema_col_name: theme, ID_COL: row[ID_COL]})
+            base.update({tema_col_name: theme, ID_COL: row[ID_COL], COMPONENTS_COL: row[COMPONENTS_COL]})
             summary_rows.append(base)
 
         seen_pairs: set[tuple[str, str]] = set()
@@ -438,7 +438,14 @@ def build_open_text_outputs(
                 continue
             seen_pairs.add(pair)
             base = {col: row[col] for col in group_cols}
-            base.update({"frammento": item["frammento"], tema_col_name: item["tema"], ID_COL: row[ID_COL]})
+            base.update(
+                {
+                    "frammento": item["frammento"],
+                    tema_col_name: item["tema"],
+                    ID_COL: row[ID_COL],
+                    COMPONENTS_COL: row[COMPONENTS_COL],
+                }
+            )
             fragment_rows.append(base)
 
     audit_df = pd.DataFrame(audit_rows)
@@ -449,11 +456,11 @@ def build_open_text_outputs(
 
     summary_df = pd.DataFrame(summary_rows)
     if summary_df.empty:
-        summary_out = pd.DataFrame(columns=[*group_cols, tema_col_name, "questionari", "pct_su_gruppo"])
+        summary_out = pd.DataFrame(columns=[*group_cols, tema_col_name, "questionari", "componenti", "pct_su_gruppo"])
     else:
         summary_out = (
             summary_df.groupby([*group_cols, tema_col_name], dropna=False, as_index=False)
-            .agg(questionari=(ID_COL, "nunique"))
+            .agg(questionari=(ID_COL, "nunique"), componenti=(COMPONENTS_COL, "sum"))
             .sort_values(
                 by=[*group_cols, "questionari", tema_col_name],
                 ascending=[True] * len(group_cols) + [False, True],
@@ -464,11 +471,11 @@ def build_open_text_outputs(
 
     fragment_df = pd.DataFrame(fragment_rows)
     if fragment_df.empty:
-        fragment_out = pd.DataFrame(columns=[*group_cols, "frammento", tema_col_name, "questionari", "pct_su_gruppo"])
+        fragment_out = pd.DataFrame(columns=[*group_cols, "frammento", tema_col_name, "questionari", "componenti", "pct_su_gruppo"])
     else:
         fragment_out = (
             fragment_df.groupby([*group_cols, "frammento", tema_col_name], dropna=False, as_index=False)
-            .agg(questionari=(ID_COL, "nunique"))
+            .agg(questionari=(ID_COL, "nunique"), componenti=(COMPONENTS_COL, "sum"))
             .sort_values(
                 by=[*group_cols, "questionari", "frammento"],
                 ascending=[True] * len(group_cols) + [False, True],
@@ -722,7 +729,7 @@ def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     outputs["top20_dest_x_motivaz"] = add_share_within_group(top20_reason, ["destinazione_prevalente"])
 
     reason_secondary = build_distribution(
-        df[df[SECONDARY_REASON_COL] != NULL_VALUE],
+        df,
         group_cols=[PRIMARY_REASON_COL],
         value_col=SECONDARY_REASON_COL,
         include_components=True,
@@ -764,7 +771,11 @@ def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     overall_mean.insert(1, "macro_provenienza", "TOTALE")
     outputs["giudizio_top15_dest"] = (
         pd.concat([overall_mean, judgment_mean], ignore_index=True)
-        .sort_values(by=["media_giudizio", "questionari", "destinazione_prevalente"], ascending=[False, False, True], kind="mergesort")
+        .sort_values(
+            by=["destinazione_prevalente", "macro_provenienza"],
+            ascending=[True, True],
+            kind="mergesort",
+        )
     )
 
     outputs.update(
