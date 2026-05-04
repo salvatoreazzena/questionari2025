@@ -1,0 +1,473 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+
+from build_analisi_preliminare import extract_prevalent_destination
+
+DEFAULT_INPUT = Path("questionari_sottocampioni.xlsx")
+DEFAULT_OUTPUT = Path("analisi_spese_sottocampioni.xlsx")
+DEFAULT_SHEETS = ["campione_1", "campione_1a", "campione_1b", "campione_1c", "campione_1d", "campione_2", "campione_3"]
+
+NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A.", "NON DISPONIBILE", "NULL"}
+SPEND_COLUMNS = [
+    "spese_trasporto_interno",
+    "spese_alloggio",
+    "spese_alimentazione",
+    "spese_ristorazione",
+    "spese_souvenir",
+    "spese_altre",
+]
+TARGET_DESTINATIONS = ["ALGHERO", "CAGLIARI", "OLBIA", "SAN TEODORO", "VILLASIMIUS"]
+BASE_REQUIRED_COLUMNS = [
+    "stato_provenienza",
+    "regione_provenienza",
+    "località_visitate",
+    "durata_soggiorno",
+    "numero_componenti",
+    "motivazione_principale",
+    "motivazione_secondaria",
+    "web",
+    *SPEND_COLUMNS,
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Costruisce le analisi STP/STPG dei sottocampioni.")
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="File Excel di input.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="File Excel di output.")
+    parser.add_argument(
+        "--sheets",
+        nargs="*",
+        default=DEFAULT_SHEETS,
+        help="Foglio o lista di fogli da elaborare. Default: tutti i campioni gestiti.",
+    )
+    return parser.parse_args()
+
+
+def normalize_text_series(series: pd.Series) -> pd.Series:
+    s = series.astype("string").fillna("").str.strip()
+    mask_null = s.str.upper().isin({token.upper() for token in NULL_TOKENS})
+    return s.mask(mask_null, "")
+
+
+def build_nationality_group(state_series: pd.Series) -> pd.Series:
+    state = normalize_text_series(state_series).str.upper()
+    out = pd.Series("NON DEFINITO", index=state.index, dtype="string")
+    out = out.mask(state.eq("ITALIA"), "ITALIANI")
+    out = out.mask((state.ne("")) & (state.ne("ITALIA")), "STRANIERI")
+    return out
+
+
+def uses_web_for_booking(value: object) -> bool:
+    if pd.isna(value):
+        return False
+    text = str(value).strip().upper()
+    if text in {"", "NO", "N", "0", "FALSE"}:
+        return False
+    return text in {"SI", "SÌ", "S", "1", "TRUE", "WEB"} or text != ""
+
+
+def safe_divide(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(float(numerator) / float(denominator), 4)
+
+
+def classify_duration(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if duration <= 0:
+        return ""
+    if duration <= 3:
+        return "1-3"
+    if duration <= 7:
+        return "4-7"
+    if duration <= 14:
+        return "8-14"
+    if duration <= 30:
+        return "15-30"
+    return "31+"
+
+
+def compute_metrics(df: pd.DataFrame) -> dict[str, object]:
+    component_sum = float(df["numero_componenti_num"].sum())
+    person_days_sum = float(df["person_days_num"].sum())
+    category_sums = {col: float(df[col].sum()) for col in SPEND_COLUMNS}
+    total_spend = float(sum(category_sums.values()))
+    return {
+        "stp_totale": safe_divide(total_spend, component_sum),
+        "stpg_totale": safe_divide(total_spend, person_days_sum),
+        "stp_categorie": {col: safe_divide(value, component_sum) for col, value in category_sums.items()},
+        "stpg_categorie": {col: safe_divide(value, person_days_sum) for col, value in category_sums.items()},
+    }
+
+
+def build_metric_row(base: dict[str, object], metrics: dict[str, object], *, daily: bool) -> dict[str, object]:
+    row = dict(base)
+    row["totale"] = metrics["stpg_totale"] if daily else metrics["stp_totale"]
+    category_metrics = metrics["stpg_categorie"] if daily else metrics["stp_categorie"]
+    for col in SPEND_COLUMNS:
+        row[col] = category_metrics[col]
+    return row
+
+
+def build_metric_tables(groups: list[tuple[dict[str, object], pd.DataFrame]]) -> list[dict[str, object]]:
+    stp_rows: list[dict[str, object]] = []
+    stpg_rows: list[dict[str, object]] = []
+
+    for base, group_df in groups:
+        metrics = compute_metrics(group_df)
+        stp_rows.append(build_metric_row(base, metrics, daily=False))
+        stpg_rows.append(build_metric_row(base, metrics, daily=True))
+
+    shared_headers = ["totale", *SPEND_COLUMNS]
+    leading_headers = [h for h in stp_rows[0].keys() if h not in shared_headers] if stp_rows else []
+    headers = [*leading_headers, *shared_headers]
+    return [
+        {"title": "Tabella STP", "headers": headers, "rows": stp_rows},
+        {"title": "Tabella STPG", "headers": headers, "rows": stpg_rows},
+    ]
+
+
+def build_generic_dimension_section(
+    df: pd.DataFrame,
+    *,
+    title: str,
+    dimension_column: str,
+    output_column: str,
+    sort_values: bool = True,
+) -> dict[str, object]:
+    values = [v for v in df[dimension_column].dropna().unique().tolist() if str(v).strip() != ""]
+    ordered_values = sorted(values) if sort_values else values
+    groups = [
+        ({output_column: value}, df[df[dimension_column] == value].copy())
+        for value in ordered_values
+    ]
+    return {"title": title, "tables": build_metric_tables(groups)}
+
+
+def summarize_dimension(df: pd.DataFrame, dimension_column: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    values = [v for v in df[dimension_column].dropna().unique().tolist() if str(v).strip() != ""]
+    for value in sorted(values):
+        subset = df[df[dimension_column] == value].copy()
+        rows.append({"valore": value, "metrics": compute_metrics(subset)})
+    return pd.DataFrame(rows)
+
+
+def build_ranking_table(
+    ranked: pd.DataFrame,
+    *,
+    ranking_label: str,
+    dimension: str,
+    daily: bool,
+) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for _, r in ranked.iterrows():
+        base = {
+            "classifica": ranking_label,
+            "dimensione": dimension,
+            "valore": r["valore"],
+        }
+        rows.append(build_metric_row(base, r["metrics"], daily=daily))
+
+    return {
+        "title": "Tabella STPG" if daily else "Tabella STP",
+        "headers": ["classifica", "dimensione", "valore", "totale", *SPEND_COLUMNS],
+        "rows": rows,
+    }
+
+
+def build_sections_campione_1(df: pd.DataFrame) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = []
+
+    sections.append(
+        {
+            "title": "1. Intero campione: italiani, stranieri, totale",
+            "tables": build_metric_tables(
+                [
+                    ({"segmento": "intero_campione", "gruppo": "ITALIANI"}, df[df["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"segmento": "intero_campione", "gruppo": "STRANIERI"}, df[df["nazionalita_grp"] == "STRANIERI"].copy()),
+                    ({"segmento": "intero_campione", "gruppo": "TOTALE"}, df.copy()),
+                ]
+            ),
+        }
+    )
+
+    web_tables: list[dict[str, object]] = []
+    for segment, subset in [
+        ("USA_WEB_PRENOTAZIONE", df[df["usa_web"]].copy()),
+        ("NON_USA_WEB_PRENOTAZIONE", df[~df["usa_web"]].copy()),
+    ]:
+        web_tables.extend(
+            build_metric_tables(
+                [
+                    ({"segmento": segment, "gruppo": "ITALIANI"}, subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"segmento": segment, "gruppo": "STRANIERI"}, subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                    ({"segmento": segment, "gruppo": "TOTALE"}, subset.copy()),
+                ]
+            )
+        )
+    sections.append({"title": "2. Uso del web per prenotare", "tables": web_tables})
+
+    destination_tables: list[dict[str, object]] = []
+    for destination in TARGET_DESTINATIONS:
+        subset = df[df["destinazione_prevalente"] == destination].copy()
+        destination_tables.extend(
+            build_metric_tables(
+                [
+                    ({"destinazione_prevalente": destination, "gruppo": "ITALIANI"}, subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"destinazione_prevalente": destination, "gruppo": "STRANIERI"}, subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                ]
+            )
+        )
+    sections.append(
+        {
+            "title": "3. Destinazione prevalente: Alghero, Cagliari, Olbia, San Teodoro, Villasimius",
+            "tables": destination_tables,
+        }
+    )
+
+    foreign = summarize_dimension(df[df["nazionalita_grp"] == "STRANIERI"].copy(), "stato_provenienza_norm")
+    foreign_stp = foreign.sort_values(by="metrics", key=lambda s: s.map(lambda m: m["stp_totale"]), ascending=False).head(5)
+    foreign_stpg = foreign.sort_values(by="metrics", key=lambda s: s.map(lambda m: m["stpg_totale"]), ascending=False).head(5)
+    sections.append(
+        {
+            "title": "4. Top 5 paesi esteri per STP totale e STPG totale",
+            "tables": [
+                build_ranking_table(foreign_stp, ranking_label="TOP_5_STP_TOTALE", dimension="paese_estero", daily=False),
+                build_ranking_table(foreign_stpg, ranking_label="TOP_5_STPG_TOTALE", dimension="paese_estero", daily=True),
+            ],
+        }
+    )
+
+    italian = summarize_dimension(df[df["nazionalita_grp"] == "ITALIANI"].copy(), "regione_provenienza_norm")
+    italian_stp = italian.sort_values(by="metrics", key=lambda s: s.map(lambda m: m["stp_totale"]), ascending=False).head(5)
+    italian_stpg = italian.sort_values(by="metrics", key=lambda s: s.map(lambda m: m["stpg_totale"]), ascending=False).head(5)
+    sections.append(
+        {
+            "title": "5. Top 5 regioni italiane per STP totale e STPG totale",
+            "tables": [
+                build_ranking_table(italian_stp, ranking_label="TOP_5_STP_TOTALE", dimension="regione_italiana", daily=False),
+                build_ranking_table(italian_stpg, ranking_label="TOP_5_STPG_TOTALE", dimension="regione_italiana", daily=True),
+            ],
+        }
+    )
+
+    motivation_tables: list[dict[str, object]] = []
+    motivations = sorted(v for v in df["motivazione_principale_norm"].dropna().unique().tolist() if v != "")
+    for motivation in motivations:
+        subset = df[df["motivazione_principale_norm"] == motivation].copy()
+        motivation_tables.extend(
+            build_metric_tables(
+                [
+                    ({"motivazione_principale": motivation, "gruppo": "ITALIANI"}, subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"motivazione_principale": motivation, "gruppo": "STRANIERI"}, subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                    ({"motivazione_principale": motivation, "gruppo": "TOTALE"}, subset.copy()),
+                ]
+            )
+        )
+    sections.append({"title": "6. Tutte le motivazioni principali", "tables": motivation_tables})
+    return sections
+
+
+def build_sections_campione_1a(df: pd.DataFrame) -> list[dict[str, object]]:
+    return [
+        build_generic_dimension_section(
+            df,
+            title="1. STP e STPG per tutte le motivazioni principali",
+            dimension_column="motivazione_principale_norm",
+            output_column="motivazione_principale",
+        )
+    ]
+
+
+def build_sections_campione_1b(df: pd.DataFrame) -> list[dict[str, object]]:
+    return [
+        build_generic_dimension_section(
+            df,
+            title="1. STP e STPG per tutte le motivazioni secondarie",
+            dimension_column="motivazione_secondaria_norm",
+            output_column="motivazione_secondaria",
+        )
+    ]
+
+
+def build_sections_campione_1c(df: pd.DataFrame) -> list[dict[str, object]]:
+    duration_tables: list[dict[str, object]] = []
+    duration_classes = [v for v in ["1-3", "4-7", "8-14", "15-30", "31+"] if v in set(df["classe_durata_soggiorno"].dropna())]
+    for duration_class in duration_classes:
+        subset = df[df["classe_durata_soggiorno"] == duration_class].copy()
+        duration_tables.extend(
+            build_metric_tables(
+                [
+                    ({"classe_durata_soggiorno": duration_class, "gruppo": "ITALIANI"}, subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"classe_durata_soggiorno": duration_class, "gruppo": "STRANIERI"}, subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                    ({"classe_durata_soggiorno": duration_class, "gruppo": "TOTALE"}, subset.copy()),
+                ]
+            )
+        )
+    return [{"title": "1. STP e STPG per italiani, stranieri e totale in funzione delle classi di durata soggiorno", "tables": duration_tables}]
+
+
+def build_sections_campione_1d(df: pd.DataFrame) -> list[dict[str, object]]:
+    motivation_tables: list[dict[str, object]] = []
+    motivations = sorted(v for v in df["motivazione_principale_norm"].dropna().unique().tolist() if v != "")
+    for motivation in motivations:
+        subset = df[df["motivazione_principale_norm"] == motivation].copy()
+        motivation_tables.extend(
+            build_metric_tables(
+                [
+                    ({"motivazione_principale": motivation, "gruppo": "ITALIANI"}, subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                    ({"motivazione_principale": motivation, "gruppo": "STRANIERI"}, subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                    ({"motivazione_principale": motivation, "gruppo": "TOTALE"}, subset.copy()),
+                ]
+            )
+        )
+    return [{"title": "1. STP e STPG per italiani, stranieri e totale in funzione della motivazione principale", "tables": motivation_tables}]
+
+
+def build_sections_campione_2(df: pd.DataFrame) -> list[dict[str, object]]:
+    return [
+        build_generic_dimension_section(
+            df,
+            title="1. STP e STPG totale e per voce per ognuno degli stati presenti",
+            dimension_column="stato_provenienza_norm",
+            output_column="stato_provenienza",
+        )
+    ]
+
+
+def build_sections_campione_3(df: pd.DataFrame) -> list[dict[str, object]]:
+    return [
+        build_generic_dimension_section(
+            df,
+            title="1. STP e STPG totale e per voce per ognuna delle regioni presenti",
+            dimension_column="regione_provenienza_norm",
+            output_column="regione_provenienza",
+        )
+    ]
+
+
+SECTION_BUILDERS = {
+    "campione_1": build_sections_campione_1,
+    "campione_1a": build_sections_campione_1a,
+    "campione_1b": build_sections_campione_1b,
+    "campione_1c": build_sections_campione_1c,
+    "campione_1d": build_sections_campione_1d,
+    "campione_2": build_sections_campione_2,
+    "campione_3": build_sections_campione_3,
+}
+
+
+def write_sheet(ws, sections: list[dict[str, object]]) -> None:
+    bold_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    bold_font = Font(bold=True)
+    title_font = Font(bold=True, size=12)
+
+    row_idx = 1
+    ws.cell(row=row_idx, column=1, value=f"Analisi spese - {ws.title}")
+    row_idx += 2
+
+    for section in sections:
+        ws.cell(row=row_idx, column=1, value=section["title"]).font = title_font
+        row_idx += 1
+
+        for table in section["tables"]:
+            ws.cell(row=row_idx, column=1, value=table["title"]).font = bold_font
+            row_idx += 1
+
+            headers = table["headers"]
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=header)
+                cell.font = bold_font
+                cell.fill = bold_fill
+            row_idx += 1
+
+            for data_row in table["rows"]:
+                for col_idx, header in enumerate(headers, start=1):
+                    ws.cell(row=row_idx, column=col_idx, value=data_row.get(header))
+                row_idx += 1
+
+            row_idx += 1
+
+    for col_idx, width in {
+        1: 30,
+        2: 24,
+        3: 24,
+        4: 18,
+        5: 18,
+        6: 18,
+        7: 18,
+        8: 18,
+        9: 18,
+        10: 18,
+    }.items():
+        ws.column_dimensions[chr(64 + col_idx)].width = width
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    missing = [col for col in BASE_REQUIRED_COLUMNS if col not in df.columns]
+    if missing:
+        raise ValueError(f"Colonne mancanti nel foglio: {missing}")
+
+    out = df.copy()
+    out["stato_provenienza_norm"] = normalize_text_series(out["stato_provenienza"]).str.upper()
+    out["regione_provenienza_norm"] = normalize_text_series(out["regione_provenienza"]).str.upper()
+    out["motivazione_principale_norm"] = normalize_text_series(out["motivazione_principale"]).str.upper()
+    out["motivazione_secondaria_norm"] = normalize_text_series(out["motivazione_secondaria"]).str.upper()
+    out["nazionalita_grp"] = build_nationality_group(out["stato_provenienza"])
+    out["destinazione_prevalente"] = out["località_visitate"].map(extract_prevalent_destination).astype("string").fillna("").str.upper()
+    out["usa_web"] = out["web"].map(uses_web_for_booking)
+    out["numero_componenti_num"] = pd.to_numeric(out["numero_componenti"], errors="coerce").fillna(0.0)
+    out["durata_soggiorno_num"] = pd.to_numeric(out["durata_soggiorno"], errors="coerce").fillna(0.0)
+    out["classe_durata_soggiorno"] = out["durata_soggiorno_num"].map(classify_duration)
+    out["person_days_num"] = out["numero_componenti_num"] * out["durata_soggiorno_num"]
+    for col in SPEND_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    return out
+
+
+def build_workbook(input_path: Path, output_path: Path, sheets: list[str]) -> None:
+    workbook_data = pd.read_excel(input_path, sheet_name=sheets)
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    for sheet_name in sheets:
+        if sheet_name not in workbook_data:
+            raise ValueError(f"Foglio non trovato nell'input: {sheet_name}")
+        if sheet_name not in SECTION_BUILDERS:
+            raise ValueError(f"Nessuna analisi configurata per il foglio: {sheet_name}")
+
+        prepared = prepare_dataframe(workbook_data[sheet_name])
+        sections = SECTION_BUILDERS[sheet_name](prepared)
+        ws = wb.create_sheet(title=sheet_name)
+        write_sheet(ws, sections)
+
+    wb.save(output_path)
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.input.exists():
+        raise FileNotFoundError(f"File non trovato: {args.input}")
+
+    requested_sheets = list(dict.fromkeys(args.sheets))
+    build_workbook(args.input, args.output, requested_sheets)
+
+    print(f"Input letto: {args.input}")
+    print(f"Fogli elaborati: {', '.join(requested_sheets)}")
+    print(f"Output generato: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
