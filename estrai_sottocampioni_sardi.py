@@ -17,6 +17,7 @@ COMPONENTI_COL = "numero_componenti"
 ETA_COL = "fascia_età"
 DURATA_COL = "durata_soggiorno"
 MOTIV_COL = "motivazione_principale"
+DEST_COL = "si_dove"
 
 NULL_VALUE = "NULL"
 NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A."}
@@ -71,6 +72,15 @@ def build_duration_class(series: pd.Series) -> pd.Series:
     out = out.mask((d >= 4) & (d <= 7), "4-7")
     out = out.mask((d >= 8) & (d <= 14), "8-14")
     out = out.mask((d >= 15) & (d <= 30), "15-30")
+    return out
+
+
+def build_destination_group(series: pd.Series) -> pd.Series:
+    s = normalize_upper(series)
+    out = pd.Series(pd.NA, index=s.index, dtype="string")
+    out = out.mask(s.eq("IN SARDEGNA"), "SARDEGNA")
+    out = out.mask(s.eq("IN ITALIA"), "ITALIA")
+    out = out.mask(s.eq("ALL'ESTERO"), "ESTERO")
     return out
 
 
@@ -752,24 +762,111 @@ def build_sample_2a(sample_2_df: pd.DataFrame, rng: random.Random):
 def build_sample_2b(sample_2_df: pd.DataFrame, rng: random.Random):
     subset = sample_2_df[sample_2_df["_durata_num"] <= 30].copy()
     subset["classe_durata_30"] = build_duration_class(subset[DURATA_COL])
+    subset["destinazione_3grp"] = build_destination_group(subset[DEST_COL])
     subset = subset[subset["classe_durata_30"].notna()].copy()
+    subset = subset[subset["destinazione_3grp"].notna()].copy()
     if subset.empty:
         raise ValueError("Campione 2b non costruibile: nessuna durata valida tra 1 e 30")
 
     duration_classes = ["1-3", "4-7", "8-14", "15-30"]
+    destination_groups = ["SARDEGNA", "ITALIA", "ESTERO"]
     present = set(get_valid_values_by_components(subset, "classe_durata_30"))
     missing = [c for c in duration_classes if c not in present]
     if missing:
         raise ValueError(f"Campione 2b non costruibile: classi durata mancanti {missing}")
 
-    selected, diag_df, meta = select_equal_rows_by_group_components(
-        subset,
-        sample_name="campione_2b_durata_1_30",
-        group_col="classe_durata_30",
-        group_values=duration_classes,
-        rng=rng,
-        ensure_province_coverage=True,
-    )
+    missing_pairs: list[str] = []
+    reserved_idx: set[int] = set()
+    reserved_components_by_duration: dict[str, float] = {cls: 0.0 for cls in duration_classes}
+    reserved_combo_labels: list[str] = []
+
+    for duration_class in duration_classes:
+        for dest_group in destination_groups:
+            cell = subset[
+                (subset["classe_durata_30"] == duration_class)
+                & (subset["destinazione_3grp"] == dest_group)
+            ].copy()
+            if cell.empty:
+                missing_pairs.append(f"{dest_group}:{duration_class}")
+                continue
+
+            # Reserve the lightest row in each destination x duration cell to guarantee coverage
+            # while perturbing the component balance as little as possible.
+            cell = cell.sort_values(
+                by=["_componenti_num", ETA_COL, "_id_text", "_row_order"],
+                ascending=[True, True, True, True],
+                kind="mergesort",
+            )
+            chosen_idx = int(cell.index[0])
+            if chosen_idx in reserved_idx:
+                continue
+            reserved_idx.add(chosen_idx)
+            reserved_components_by_duration[duration_class] += float(subset.loc[chosen_idx, "_componenti_num"])
+            reserved_combo_labels.append(f"{dest_group}:{duration_class}")
+
+    if missing_pairs:
+        raise ValueError(
+            "Campione 2b non costruibile: combinazioni destinazione x durata mancanti "
+            f"{missing_pairs}"
+        )
+
+    plans: list[tuple[str, float]] = []
+    for duration_class in duration_classes:
+        cell = subset[subset["classe_durata_30"] == duration_class].copy()
+        available_components = float(cell["_componenti_num"].sum())
+        if available_components <= 0:
+            raise ValueError(f"Campione campione_2b_durata_1_30 non costruibile: nessun componente per gruppo {duration_class}")
+        plans.append((duration_class, available_components))
+
+    target_components = min(available_components for _, available_components in plans)
+    if target_components <= 0:
+        raise ValueError("Campione campione_2b_durata_1_30 non costruibile: target componenti = 0")
+
+    selected_indices_all: list[pd.Index] = []
+    diag_rows: list[dict[str, object]] = []
+
+    for duration_class, available_components in plans:
+        cell = subset[subset["classe_durata_30"] == duration_class].copy()
+        reserved_cell = cell[cell.index.isin(reserved_idx)].copy()
+        reserved_components = float(reserved_cell["_componenti_num"].sum())
+        remaining_target = max(target_components - reserved_components, 0.0)
+        pool = cell[~cell.index.isin(reserved_idx)].copy()
+
+        extra_idx, extra_components = select_cell_rows_with_optimal_deviation(
+            pool,
+            remaining_target,
+            rng=rng,
+        )
+        selected_idx = reserved_cell.index.append(extra_idx)
+        selected_components = reserved_components + extra_components
+        selected_indices_all.append(selected_idx)
+        diag_rows.append(
+            {
+                "campione": "campione_2b_durata_1_30",
+                "dimensione_gruppo": "classe_durata_30",
+                "valore_gruppo": duration_class,
+                "componenti_disponibili": format_number(available_components),
+                "target_componenti": format_number(target_components),
+                "componenti_riservati_destinazione_durata": format_number(reserved_components),
+                "componenti_selezionati": format_number(selected_components),
+                "overshoot_componenti": format_number(selected_components - target_components),
+            }
+        )
+
+    final_idx = pd.Index([], dtype="int64")
+    for idx in selected_indices_all:
+        final_idx = final_idx.append(idx)
+
+    selected = subset.loc[final_idx].copy()
+    selected["campione"] = "campione_2b_durata_1_30"
+    diag_df = pd.DataFrame(diag_rows)
+    meta = {
+        "campione": "campione_2b_durata_1_30",
+        "dimensione_gruppo": "classe_durata_30",
+        "n_gruppi": len(duration_classes),
+        "target_componenti_per_cella": format_number(target_components),
+        "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
+    }
     selected, added_provinces, missing_provinces, extra_components_added = ensure_all_provinces_covered(
         selected,
         subset,
@@ -786,6 +883,8 @@ def build_sample_2b(sample_2_df: pd.DataFrame, rng: random.Random):
     meta["classi_durata"] = ", ".join(duration_classes)
     meta["componenti_totali_selezionati"] = format_number(float(selected["_componenti_num"].sum()))
     meta["fasce_eta_presenti_finali"] = ", ".join(final_age_bands)
+    meta["copertura_minima_destinazione_x_durata"] = ", ".join(reserved_combo_labels)
+    meta["n_record_riservati_destinazione_x_durata"] = len(reserved_idx)
     meta["province_aggiunte_per_copertura"] = ", ".join(added_provinces)
     meta["province_non_copribili"] = ", ".join(missing_provinces)
     meta["extra_componenti_per_copertura_province"] = format_number(extra_components_added)
