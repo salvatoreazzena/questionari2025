@@ -13,6 +13,7 @@ DEFAULT_OUTPUT = Path("questionari_sardi_sottocampioni.xlsx")
 ID_COL = "ID"
 VACANZA_COL = "vacanza_2025"
 PACCHETTO_COL = "pacchetto"
+COMPONENTI_COL = "numero_componenti"
 ETA_COL = "fascia_età"
 DURATA_COL = "durata_soggiorno"
 MOTIV_COL = "motivazione_principale"
@@ -23,7 +24,7 @@ SI_VALUES = {"SI", "SÌ"}
 NO_VALUES = {"NO"}
 BALNEARE_VALUE = "BALNEARE"
 
-REQUIRED_COLUMNS = [VACANZA_COL, PACCHETTO_COL, ETA_COL, DURATA_COL, MOTIV_COL]
+REQUIRED_COLUMNS = [VACANZA_COL, PACCHETTO_COL, COMPONENTI_COL, ETA_COL, DURATA_COL, MOTIV_COL]
 PROVINCIA_COL = "provincia_provenienza"
 
 
@@ -31,6 +32,7 @@ PROVINCIA_COL = "provincia_provenienza"
 class CellPlan:
     group_value: str
     fascia_eta: str
+    available_components: float
     available_rows: int
 
 
@@ -76,12 +78,198 @@ def normalize_province_series(series: pd.Series) -> pd.Series:
     return normalize_upper(series)
 
 
+def get_valid_values_by_components(df: pd.DataFrame, value_col: str) -> list[str]:
+    grouped = (
+        df.groupby(value_col, as_index=False)
+        .agg(componenti=("_componenti_num", "sum"))
+        .sort_values(by=[value_col], kind="mergesort")
+    )
+    return [str(r[value_col]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0]
+
+
+def motivation_sort_priority_sardinia(value: object) -> int:
+    text = str(value).strip().upper()
+    if text == "ENOGASTRONOMICO":
+        return 0
+    if text == "ALTRO":
+        return 1
+    return 2
+
+
+def build_stratum_keys(df: pd.DataFrame, cols: list[str]) -> list[tuple[str, ...]]:
+    if not cols:
+        return [("__ALL__",)] * len(df)
+    normalized_cols = [normalize_text_series(df[col]).astype("string").tolist() for col in cols]
+    return list(zip(*normalized_cols, strict=False))
+
+
+def format_number(value: float) -> int | float:
+    rounded = round(float(value), 6)
+    as_int = int(round(rounded))
+    if abs(rounded - as_int) < 1e-9:
+        return as_int
+    return rounded
+
+
+def is_integer_like(value: float, *, tol: float = 1e-9) -> bool:
+    return abs(float(value) - round(float(value))) <= tol
+
+
+def _component_bucket(value: float) -> str:
+    if value <= 2:
+        return "LOW"
+    if value <= 4:
+        return "MID"
+    return "HIGH"
+
+
+def _build_variety_order(cell_df: pd.DataFrame, rng: random.Random) -> pd.DataFrame:
+    work = cell_df.copy()
+    work["_bucket"] = work["_componenti_num"].map(lambda v: _component_bucket(float(v)))
+
+    low = work[work["_bucket"] == "LOW"].sample(frac=1, random_state=rng.randint(0, 10**9))
+    mid = work[work["_bucket"] == "MID"].sample(frac=1, random_state=rng.randint(0, 10**9))
+    high = work[work["_bucket"] == "HIGH"].sample(frac=1, random_state=rng.randint(0, 10**9))
+
+    chunks = {"LOW": low, "MID": mid, "HIGH": high}
+    pointers = {k: 0 for k in chunks}
+    patterns = [
+        ["HIGH", "MID", "LOW"],
+        ["MID", "HIGH", "LOW"],
+        ["HIGH", "LOW", "MID"],
+        ["MID", "LOW", "HIGH"],
+    ]
+    pattern = patterns[rng.randrange(len(patterns))]
+
+    ordered_idx: list[int] = []
+    remaining = int(len(work))
+    while remaining > 0:
+        progressed = False
+        for bucket in pattern:
+            ptr = pointers[bucket]
+            df_b = chunks[bucket]
+            if ptr < len(df_b):
+                ordered_idx.append(int(df_b.index[ptr]))
+                pointers[bucket] += 1
+                remaining -= 1
+                progressed = True
+        if not progressed:
+            break
+
+    out = work.loc[pd.Index(ordered_idx)]
+    return out.drop(columns=["_bucket"])
+
+
+def select_cell_rows_with_optimal_deviation(
+    cell_df: pd.DataFrame,
+    target_components: float,
+    *,
+    rng: random.Random,
+    selection_trials: int = 200,
+) -> tuple[pd.Index, float]:
+    if target_components <= 0:
+        return pd.Index([], dtype="int64"), 0.0
+
+    can_meet_target = float(cell_df["_componenti_num"].sum()) >= float(target_components) - 1e-9
+    component_values = [float(v) for v in cell_df["_componenti_num"].tolist()]
+    if component_values and is_integer_like(target_components) and all(is_integer_like(v) for v in component_values):
+        target_int = int(round(target_components))
+        values_int = [int(round(v)) for v in component_values]
+        max_value = max(values_int)
+        upper_bound = target_int + max_value
+
+        parent: dict[int, tuple[int, int] | None] = {0: None}
+        for pos, val in enumerate(values_int):
+            current_sums = sorted(parent.keys(), reverse=True)
+            for s in current_sums:
+                new_sum = s + val
+                if new_sum > upper_bound:
+                    continue
+                if new_sum not in parent:
+                    parent[new_sum] = (s, pos)
+
+        if len(parent) > 1:
+            best_sum = min(
+                parent.keys(),
+                key=lambda s: (
+                    1 if can_meet_target and s < target_int else 0,
+                    max(s - target_int, 0),
+                    abs(s - target_int),
+                    -s,
+                ),
+            )
+            if best_sum > 0:
+                chosen_pos: list[int] = []
+                cursor = best_sum
+                while cursor != 0:
+                    prev = parent.get(cursor)
+                    if prev is None:
+                        break
+                    prev_sum, pos = prev
+                    chosen_pos.append(pos)
+                    cursor = prev_sum
+                chosen_pos.reverse()
+
+                idx_values = cell_df.index.tolist()
+                chosen_idx = [int(idx_values[p]) for p in chosen_pos]
+                return pd.Index(chosen_idx, dtype="int64"), float(best_sum)
+
+    best_idx = pd.Index([], dtype="int64")
+    best_total = 0.0
+    best_key: tuple[float, float, float, float, int, float] | None = None
+
+    for _ in range(max(1, int(selection_trials))):
+        ordered = _build_variety_order(cell_df, rng)
+        cumulative = 0.0
+        cumulative_before = 0.0
+        selected_indices: list[int] = []
+
+        for idx, row in ordered.iterrows():
+            cumulative_before = cumulative
+            cumulative += float(row["_componenti_num"])
+            selected_indices.append(int(idx))
+            if cumulative >= target_components:
+                break
+
+        if (
+            selected_indices
+            and (not can_meet_target or cumulative_before >= target_components - 1e-9)
+            and abs(cumulative_before - target_components) <= abs(cumulative - target_components)
+        ):
+            selected_indices = selected_indices[:-1]
+            cumulative = cumulative_before
+
+        selected = cell_df.loc[pd.Index(selected_indices)] if selected_indices else cell_df.iloc[0:0]
+        selected_components = selected["_componenti_num"].astype(float)
+        unique_comp = int(selected_components.nunique())
+        std_comp = float(selected_components.std(ddof=0)) if len(selected_components) > 1 else 0.0
+
+        overshoot = max(cumulative - target_components, 0.0)
+        undershoot = max(target_components - cumulative, 0.0)
+        key = (
+            1 if can_meet_target and undershoot > 1e-9 else 0,
+            overshoot,
+            undershoot,
+            abs(cumulative - target_components),
+            -unique_comp,
+            -std_comp,
+        )
+
+        if best_key is None or key < best_key:
+            best_key = key
+            best_idx = pd.Index(selected_indices, dtype="int64")
+            best_total = cumulative
+
+    return best_idx, best_total
+
+
 def prepare_base(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out[VACANZA_COL] = normalize_upper(out[VACANZA_COL])
     out[ETA_COL] = build_age_sampling_band(out[ETA_COL])
     out[MOTIV_COL] = normalize_upper(out[MOTIV_COL])
     out["_durata_num"] = pd.to_numeric(out[DURATA_COL], errors="coerce")
+    out["_componenti_num"] = pd.to_numeric(out[COMPONENTI_COL], errors="coerce")
 
     out["_row_order"] = out.index.astype("int64")
     if ID_COL in out.columns:
@@ -93,6 +281,8 @@ def prepare_base(df: pd.DataFrame) -> pd.DataFrame:
         out[PACCHETTO_COL].map(is_empty_or_na)
         & (out[ETA_COL] != NULL_VALUE)
         & out[VACANZA_COL].isin(SI_VALUES | NO_VALUES)
+        & out["_componenti_num"].notna()
+        & (out["_componenti_num"] > 0)
     )
     return out.loc[mask].copy()
 
@@ -100,7 +290,12 @@ def prepare_base(df: pd.DataFrame) -> pd.DataFrame:
 def compute_common_age_bands(df: pd.DataFrame, group_col: str, group_values: list[str]) -> list[str]:
     sets: list[set[str]] = []
     for gv in group_values:
-        age_vals = set(df.loc[df[group_col] == gv, ETA_COL].dropna().astype("string").tolist())
+        grouped = (
+            df[df[group_col] == gv]
+            .groupby(ETA_COL, as_index=False)
+            .agg(componenti=("_componenti_num", "sum"))
+        )
+        age_vals = {str(r[ETA_COL]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0}
         if not age_vals:
             raise ValueError(f"Nessuna fascia eta per gruppo {gv}")
         sets.append(age_vals)
@@ -124,33 +319,49 @@ def select_equal_rows_by_age(
     plans: list[CellPlan] = []
     for gv in group_values:
         for age in age_bands:
-            n = int(len(df[(df[group_col] == gv) & (df[ETA_COL] == age)]))
-            plans.append(CellPlan(gv, age, n))
+            cell = df[(df[group_col] == gv) & (df[ETA_COL] == age)]
+            plans.append(
+                CellPlan(
+                    gv,
+                    age,
+                    float(cell["_componenti_num"].sum()),
+                    int(len(cell)),
+                )
+            )
 
-    target_n = min(p.available_rows for p in plans)
-    if target_n <= 0:
-        raise ValueError(f"Campione {sample_name} non costruibile: target per cella = {target_n}")
+    target_components = min(p.available_components for p in plans)
+    if target_components <= 0:
+        raise ValueError(f"Campione {sample_name} non costruibile: target componenti = {target_components}")
 
-    selected_chunks: list[pd.DataFrame] = []
+    selected_indices_all: list[pd.Index] = []
     diag_rows: list[dict[str, object]] = []
 
     for p in plans:
         cell = df[(df[group_col] == p.group_value) & (df[ETA_COL] == p.fascia_eta)].copy()
-        sampled = cell.sample(n=target_n, random_state=rng.randint(0, 10**9), replace=False)
-        selected_chunks.append(sampled)
+        selected_idx, selected_components = select_cell_rows_with_optimal_deviation(
+            cell,
+            target_components,
+            rng=rng,
+        )
+        selected_indices_all.append(selected_idx)
         diag_rows.append(
             {
                 "campione": sample_name,
                 "dimensione_gruppo": group_col,
                 "valore_gruppo": p.group_value,
                 "fascia_eta": p.fascia_eta,
-                "questionari_disponibili": p.available_rows,
-                "target_questionari": target_n,
-                "questionari_selezionati": int(len(sampled)),
+                "componenti_disponibili": format_number(p.available_components),
+                "target_componenti": format_number(target_components),
+                "componenti_selezionati": format_number(selected_components),
+                "overshoot_componenti": format_number(selected_components - target_components),
             }
         )
 
-    selected = pd.concat(selected_chunks, ignore_index=False)
+    final_idx = pd.Index([], dtype="int64")
+    for idx in selected_indices_all:
+        final_idx = final_idx.append(idx)
+
+    selected = df.loc[final_idx].copy()
     selected["campione"] = sample_name
     selected = selected.sort_values(by=[group_col, ETA_COL, "_id_text", "_row_order"], kind="mergesort")
 
@@ -159,9 +370,122 @@ def select_equal_rows_by_age(
         "dimensione_gruppo": group_col,
         "n_gruppi": len(group_values),
         "n_fasce_eta": len(age_bands),
-        "target_questionari_per_cella": int(target_n),
-        "questionari_totali": int(len(selected)),
+        "target_componenti_per_cella": format_number(target_components),
+        "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
         "fasce_eta": ", ".join(age_bands),
+    }
+    return selected, pd.DataFrame(diag_rows), meta
+
+
+def select_equal_rows_by_group_components(
+    df: pd.DataFrame,
+    *,
+    sample_name: str,
+    group_col: str,
+    group_values: list[str],
+    rng: random.Random,
+    ensure_province_coverage: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    plans: list[tuple[str, float]] = []
+    for gv in group_values:
+        cell = df[df[group_col] == gv].copy()
+        available_components = float(cell["_componenti_num"].sum())
+        if available_components <= 0:
+            raise ValueError(f"Campione {sample_name} non costruibile: nessun componente per gruppo {gv}")
+        plans.append((gv, available_components))
+
+    target_components = min(available_components for _, available_components in plans)
+    if target_components <= 0:
+        raise ValueError(f"Campione {sample_name} non costruibile: target componenti = {target_components}")
+
+    reserved_idx: set[int] = set()
+    reserved_components_by_group: dict[str, float] = {str(gv): 0.0 for gv in group_values}
+    reserved_provinces: list[str] = []
+
+    if ensure_province_coverage and PROVINCIA_COL in df.columns:
+        work = df.copy()
+        work["_prov_norm"] = normalize_province_series(work[PROVINCIA_COL])
+        valid_mask = work["_prov_norm"].notna() & (work["_prov_norm"] != NULL_VALUE)
+        required_provinces = sorted(set(work.loc[valid_mask, "_prov_norm"].astype("string").tolist()))
+        prov_freq = work.loc[valid_mask, "_prov_norm"].value_counts().to_dict()
+
+        for prov in sorted(required_provinces, key=lambda p: (prov_freq.get(p, 0), str(p))):
+            candidates = work[(work["_prov_norm"] == prov) & (~work.index.isin(reserved_idx))].copy()
+            if candidates.empty:
+                continue
+
+            best_idx: int | None = None
+            best_key: tuple[float, float, float, str] | None = None
+            for idx, row in candidates.iterrows():
+                group_value = str(row[group_col])
+                if group_value not in reserved_components_by_group:
+                    continue
+                comp = float(row["_componenti_num"])
+                reserved_after = reserved_components_by_group[group_value] + comp
+                key = (
+                    max(reserved_after - target_components, 0.0),
+                    reserved_components_by_group[group_value],
+                    comp,
+                    str(row["_id_text"]),
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_idx = int(idx)
+
+            if best_idx is None:
+                continue
+
+            reserved_idx.add(best_idx)
+            reserved_group = str(work.loc[best_idx, group_col])
+            reserved_components_by_group[reserved_group] += float(work.loc[best_idx, "_componenti_num"])
+            reserved_provinces.append(str(prov))
+
+    selected_indices_all: list[pd.Index] = []
+    diag_rows: list[dict[str, object]] = []
+
+    for gv, available_components in plans:
+        cell = df[df[group_col] == gv].copy()
+        reserved_cell = cell[cell.index.isin(reserved_idx)].copy()
+        reserved_components = float(reserved_cell["_componenti_num"].sum())
+        remaining_target = max(target_components - reserved_components, 0.0)
+        pool = cell[~cell.index.isin(reserved_idx)].copy()
+
+        extra_idx, extra_components = select_cell_rows_with_optimal_deviation(
+            pool,
+            remaining_target,
+            rng=rng,
+        )
+        selected_idx = reserved_cell.index.append(extra_idx)
+        selected_components = reserved_components + extra_components
+        selected_indices_all.append(selected_idx)
+        diag_rows.append(
+            {
+                "campione": sample_name,
+                "dimensione_gruppo": group_col,
+                "valore_gruppo": gv,
+                "componenti_disponibili": format_number(available_components),
+                "target_componenti": format_number(target_components),
+                "componenti_riservati_province": format_number(reserved_components),
+                "componenti_selezionati": format_number(selected_components),
+                "overshoot_componenti": format_number(selected_components - target_components),
+            }
+        )
+
+    final_idx = pd.Index([], dtype="int64")
+    for idx in selected_indices_all:
+        final_idx = final_idx.append(idx)
+
+    selected = df.loc[final_idx].copy()
+    selected["campione"] = sample_name
+    selected = selected.sort_values(by=[group_col, "_id_text", "_row_order"], kind="mergesort")
+
+    meta = {
+        "campione": sample_name,
+        "dimensione_gruppo": group_col,
+        "n_gruppi": len(group_values),
+        "target_componenti_per_cella": format_number(target_components),
+        "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
+        "province_riservate_in_estrazione": ", ".join(sorted(set(reserved_provinces))),
     }
     return selected, pd.DataFrame(diag_rows), meta
 
@@ -169,67 +493,123 @@ def select_equal_rows_by_age(
 def ensure_all_provinces_covered(
     selected: pd.DataFrame,
     pool: pd.DataFrame,
-) -> tuple[pd.DataFrame, list[str]]:
+    *,
+    strata_cols: list[str],
+    relaxed_strata_cols: list[str] | None = None,
+    append_only: bool = False,
+) -> tuple[pd.DataFrame, list[str], list[str], float]:
     if PROVINCIA_COL not in selected.columns or PROVINCIA_COL not in pool.columns:
-        return selected, []
+        return selected, [], [], 0.0
 
     sel = selected.copy()
     pool2 = pool.copy()
     sel["_prov_norm"] = normalize_province_series(sel[PROVINCIA_COL])
     pool2["_prov_norm"] = normalize_province_series(pool2[PROVINCIA_COL])
+    sel["_stratum_key"] = build_stratum_keys(sel, strata_cols)
+    pool2["_stratum_key"] = build_stratum_keys(pool2, strata_cols)
+
+    relaxed_cols = strata_cols if relaxed_strata_cols is None else relaxed_strata_cols
+    sel["_relaxed_stratum_key"] = build_stratum_keys(sel, relaxed_cols)
+    pool2["_relaxed_stratum_key"] = build_stratum_keys(pool2, relaxed_cols)
 
     valid_mask_pool = pool2["_prov_norm"].notna() & (pool2["_prov_norm"] != NULL_VALUE)
     required_provinces = sorted(set(pool2.loc[valid_mask_pool, "_prov_norm"].astype("string").tolist()))
     if not required_provinces:
-        return selected, []
+        return selected, [], [], 0.0
 
     added: list[str] = []
+    extra_components_added = 0.0
+    valid_selected_strata = set(sel["_stratum_key"].tolist())
+    valid_relaxed_strata = set(sel["_relaxed_stratum_key"].tolist())
 
     while True:
-        current = set(sel.loc[sel["_prov_norm"].notna() & (sel["_prov_norm"] != NULL_VALUE), "_prov_norm"].astype("string").tolist())
+        current = set(
+            sel.loc[sel["_prov_norm"].notna() & (sel["_prov_norm"] != NULL_VALUE), "_prov_norm"].astype("string").tolist()
+        )
         missing = [p for p in required_provinces if p not in current]
         if not missing:
             break
 
-        target_prov = missing[0]
-        candidates = pool2[(pool2["_prov_norm"] == target_prov) & (~pool2.index.isin(sel.index))].copy()
-        if candidates.empty:
-            break
-        candidates = candidates.sort_values(by=["_id_text", "_row_order"], kind="mergesort")
-
-        replaced = False
-        for cand_idx, cand_row in candidates.iterrows():
-            age = str(cand_row[ETA_COL])
-            same_age = sel[sel[ETA_COL] == age].copy()
-            if same_age.empty:
+        progress = False
+        for target_prov in missing:
+            candidates = pool2[(pool2["_prov_norm"] == target_prov) & (~pool2.index.isin(sel.index))].copy()
+            if candidates.empty:
                 continue
+            candidates = candidates.sort_values(by=["_id_text", "_row_order"], kind="mergesort")
 
-            prov_counts = same_age["_prov_norm"].value_counts(dropna=False)
-            removable = same_age[
-                same_age["_prov_norm"].map(lambda p: prov_counts.get(p, 0) > 1 or pd.isna(p) or p == NULL_VALUE)
+            replaced = False
+            if not append_only:
+                for cand_idx, cand_row in candidates.iterrows():
+                    stratum_key = cand_row["_stratum_key"]
+                    same_stratum = sel[sel["_stratum_key"] == stratum_key].copy()
+                    if same_stratum.empty:
+                        continue
+
+                    prov_counts = same_stratum["_prov_norm"].value_counts(dropna=False)
+                    removable = same_stratum[
+                        same_stratum["_prov_norm"].map(lambda p: prov_counts.get(p, 0) > 1 or pd.isna(p) or p == NULL_VALUE)
+                    ].copy()
+                    if removable.empty:
+                        continue
+
+                    removable = removable.sort_values(
+                        by=["_id_text", "_row_order"], ascending=[False, False], kind="mergesort"
+                    )
+                    drop_idx = int(removable.index[0])
+
+                    sel = sel.drop(index=drop_idx)
+                    row_add = pool2.loc[[cand_idx]].copy()
+                    for col in sel.columns:
+                        if col not in row_add.columns:
+                            row_add[col] = pd.NA
+                    row_add = row_add[sel.columns]
+                    sel = pd.concat([sel, row_add], axis=0)
+                    added.append(str(target_prov))
+                    replaced = True
+                    progress = True
+                    break
+
+            if replaced:
+                break
+
+            append_candidates = pool2[
+                (pool2["_prov_norm"] == target_prov)
+                & (~pool2.index.isin(sel.index))
+                & (pool2["_relaxed_stratum_key"].isin(valid_relaxed_strata))
             ].copy()
-            if removable.empty:
+            if append_candidates.empty:
                 continue
+            append_candidates = append_candidates.sort_values(
+                by=["_componenti_num", "_id_text", "_row_order"],
+                ascending=[True, True, True],
+                kind="mergesort",
+            )
 
-            removable = removable.sort_values(by=["_id_text", "_row_order"], ascending=[False, False], kind="mergesort")
-            drop_idx = int(removable.index[0])
+            for cand_idx, cand_row in append_candidates.iterrows():
+                row_add = pool2.loc[[cand_idx]].copy()
+                for col in sel.columns:
+                    if col not in row_add.columns:
+                        row_add[col] = pd.NA
+                row_add = row_add[sel.columns]
+                sel = pd.concat([sel, row_add], axis=0)
+                added.append(str(target_prov))
+                extra_components_added += float(cand_row["_componenti_num"])
+                progress = True
+                break
 
-            sel = sel.drop(index=drop_idx)
-            row_add = pool2.loc[[cand_idx]].copy()
-            for col in sel.columns:
-                if col not in row_add.columns:
-                    row_add[col] = pd.NA
-            row_add = row_add[sel.columns]
-            sel = pd.concat([sel, row_add], axis=0)
-            added.append(str(target_prov))
-            replaced = True
+            if progress:
+                break
+
+        if not progress:
             break
 
-        if not replaced:
-            break
+    current = set(
+        sel.loc[sel["_prov_norm"].notna() & (sel["_prov_norm"] != NULL_VALUE), "_prov_norm"].astype("string").tolist()
+    )
+    missing = [p for p in required_provinces if p not in current]
 
-    sel = sel.drop(columns=["_prov_norm"], errors="ignore")
-    return sel, sorted(set(added))
+    sel = sel.drop(columns=["_prov_norm", "_stratum_key", "_relaxed_stratum_key"], errors="ignore")
+    return sel, sorted(set(added)), missing, extra_components_added
 
 
 def build_sample_1(df_base: pd.DataFrame, rng: random.Random):
@@ -256,65 +636,33 @@ def build_sample_2(df_base: pd.DataFrame, rng: random.Random):
     if subset.empty:
         raise ValueError("Campione 2 non costruibile: nessun turista con vacanza_2025 = Si")
 
-    # Campione 2: bilanciato per fascia eta + copertura di tutte le province valide.
+    # Campione 2: bilanciato per fascia eta; la provincia non entra nelle quote,
+    # ma proviamo a mantenere almeno un caso per ogni provincia valida.
     subset["_prov_norm"] = normalize_province_series(subset[PROVINCIA_COL])
     subset["_is_prov_valid"] = subset["_prov_norm"].notna() & (subset["_prov_norm"] != NULL_VALUE)
     subset = subset[subset["_is_prov_valid"]].copy()
     if subset.empty:
         raise ValueError("Campione 2 non costruibile: nessuna provincia valida dopo esclusione ND/NULL")
 
-    age_bands = sorted(subset[ETA_COL].astype("string").unique().tolist())
-    target_n = min(int(len(subset[subset[ETA_COL] == a])) for a in age_bands)
-    if target_n <= 0:
-        raise ValueError("Campione 2 non costruibile: target per fascia eta nullo")
+    age_bands = get_valid_values_by_components(subset, ETA_COL)
+    target_components = min(float(subset.loc[subset[ETA_COL] == a, "_componenti_num"].sum()) for a in age_bands)
+    if target_components <= 0:
+        raise ValueError("Campione 2 non costruibile: target componenti per fascia eta nullo")
 
-    required_provinces = sorted(
-        set(subset.loc[subset["_is_prov_valid"], "_prov_norm"].astype("string").tolist())
-    )
-
-    reserved_idx: set[int] = set()
-    reserved_per_age: dict[str, int] = {str(a): 0 for a in age_bands}
-    prov_freq = subset.loc[subset["_is_prov_valid"], "_prov_norm"].value_counts().to_dict()
-
-    for prov in sorted(required_provinces, key=lambda p: (prov_freq.get(p, 0), str(p))):
-        candidates = subset[(subset["_prov_norm"] == prov) & (~subset.index.isin(reserved_idx))].copy()
-        if candidates.empty:
-            continue
-        candidates = candidates.sort_values(by=["_id_text", "_row_order"], kind="mergesort")
-
-        chosen_idx = None
-        chosen_key = None
-        for idx, row in candidates.iterrows():
-            age = str(row[ETA_COL])
-            if reserved_per_age.get(age, 0) >= target_n:
-                continue
-            key = (reserved_per_age.get(age, 0), str(age), str(row["_id_text"]))
-            if chosen_key is None or key < chosen_key:
-                chosen_key = key
-                chosen_idx = int(idx)
-        if chosen_idx is None:
-            continue
-
-        reserved_idx.add(chosen_idx)
-        chosen_age = str(subset.loc[chosen_idx, ETA_COL])
-        reserved_per_age[chosen_age] += 1
-
-    selected_chunks: list[pd.DataFrame] = []
+    selected_indices_all: list[pd.Index] = []
     diag_rows: list[dict[str, object]] = []
 
     for age in age_bands:
         cell = subset[subset[ETA_COL] == age].copy()
-        base_reserved = cell.loc[cell.index.isin(reserved_idx)].copy()
-        need = target_n - len(base_reserved)
-        if need < 0:
-            base_reserved = base_reserved.sample(n=target_n, random_state=rng.randint(0, 10**9), replace=False)
-            need = 0
-        pool = cell.loc[~cell.index.isin(base_reserved.index)].copy()
-        if len(pool) < need:
-            raise ValueError(f"Campione 2 non costruibile per fascia eta {age}: disponibilita insufficiente")
-        extra = pool.sample(n=need, random_state=rng.randint(0, 10**9), replace=False)
-        sampled = pd.concat([base_reserved, extra], ignore_index=False)
-        selected_chunks.append(sampled)
+        available_components = float(cell["_componenti_num"].sum())
+        if available_components < target_components - 1e-9:
+            raise ValueError(f"Campione 2 non costruibile per fascia eta {age}: componenti insufficienti")
+        selected_idx, selected_components = select_cell_rows_with_optimal_deviation(
+            cell,
+            target_components,
+            rng=rng,
+        )
+        selected_indices_all.append(selected_idx)
 
         diag_rows.append(
             {
@@ -322,24 +670,44 @@ def build_sample_2(df_base: pd.DataFrame, rng: random.Random):
                 "dimensione_gruppo": "gruppo_vacanza",
                 "valore_gruppo": "VACANZA",
                 "fascia_eta": age,
-                "questionari_disponibili": int(len(cell)),
-                "target_questionari": int(target_n),
-                "questionari_selezionati": int(len(sampled)),
+                "componenti_disponibili": format_number(available_components),
+                "target_componenti": format_number(target_components),
+                "componenti_selezionati": format_number(selected_components),
+                "overshoot_componenti": format_number(selected_components - target_components),
             }
         )
 
-    selected = pd.concat(selected_chunks, ignore_index=False)
+    final_idx = pd.Index([], dtype="int64")
+    for idx in selected_indices_all:
+        final_idx = final_idx.append(idx)
+
+    selected = subset.loc[final_idx].copy()
+    selected, added_provinces, missing_provinces, extra_components_added = ensure_all_provinces_covered(
+        selected,
+        subset,
+        strata_cols=[],
+        relaxed_strata_cols=[],
+        append_only=True,
+    )
+    if missing_provinces:
+        raise ValueError(f"Campione 2 non costruibile: province non copribili {missing_provinces}")
     selected["campione"] = "campione_2_vacanza"
     selected = selected.sort_values(by=[ETA_COL, "_id_text", "_row_order"], kind="mergesort")
+    final_age_bands = get_valid_values_by_components(selected, ETA_COL)
 
     meta = {
         "campione": "campione_2_vacanza",
         "dimensione_gruppo": "gruppo_vacanza",
         "n_gruppi": 1,
         "n_fasce_eta": len(age_bands),
-        "target_questionari_per_cella": int(target_n),
-        "questionari_totali": int(len(selected)),
+        "target_componenti_per_cella": format_number(target_components),
+        "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
         "fasce_eta": ", ".join(age_bands),
+        "fasce_eta_nucleo_bilanciato": ", ".join(age_bands),
+        "fasce_eta_presenti_finali": ", ".join(final_age_bands),
+        "province_aggiunte_per_copertura": ", ".join(added_provinces),
+        "province_non_copribili": ", ".join(missing_provinces),
+        "extra_componenti_per_copertura_province": format_number(extra_components_added),
         "province_coperte": int(
             normalize_province_series(selected[PROVINCIA_COL]).replace(NULL_VALUE, pd.NA).dropna().nunique()
         ) if PROVINCIA_COL in selected.columns else 0,
@@ -353,13 +721,32 @@ def build_sample_2a(sample_2_df: pd.DataFrame, rng: random.Random):
         raise ValueError("Campione 2a non costruibile: nessun record non balneare")
 
     subset["gruppo_2a"] = "NO_BALNEARE"
-    return select_equal_rows_by_age(
+    selected, diag, meta = select_equal_rows_by_age(
         subset,
         sample_name="campione_2a_no_balneare",
         group_col="gruppo_2a",
         group_values=["NO_BALNEARE"],
         rng=rng,
     )
+    selected, added_provinces, missing_provinces, extra_components_added = ensure_all_provinces_covered(
+        selected,
+        subset,
+        strata_cols=[ETA_COL],
+        relaxed_strata_cols=[],
+    )
+    if missing_provinces:
+        raise ValueError(f"Campione 2a non costruibile: province non copribili {missing_provinces}")
+    final_age_bands = get_valid_values_by_components(selected, ETA_COL)
+    meta["province_aggiunte_per_copertura"] = ", ".join(added_provinces)
+    meta["province_non_copribili"] = ", ".join(missing_provinces)
+    meta["extra_componenti_per_copertura_province"] = format_number(extra_components_added)
+    meta["province_coperte"] = int(
+        normalize_province_series(selected[PROVINCIA_COL]).replace(NULL_VALUE, pd.NA).dropna().nunique()
+    ) if PROVINCIA_COL in selected.columns else 0
+    meta["componenti_totali_selezionati"] = format_number(float(selected["_componenti_num"].sum()))
+    meta["fasce_eta_nucleo_bilanciato"] = meta.get("fasce_eta", "")
+    meta["fasce_eta_presenti_finali"] = ", ".join(final_age_bands)
+    return selected, diag, meta
 
 
 def build_sample_2b(sample_2_df: pd.DataFrame, rng: random.Random):
@@ -370,55 +757,42 @@ def build_sample_2b(sample_2_df: pd.DataFrame, rng: random.Random):
         raise ValueError("Campione 2b non costruibile: nessuna durata valida tra 1 e 30")
 
     duration_classes = ["1-3", "4-7", "8-14", "15-30"]
-    present = set(subset["classe_durata_30"].astype("string").tolist())
+    present = set(get_valid_values_by_components(subset, "classe_durata_30"))
     missing = [c for c in duration_classes if c not in present]
     if missing:
         raise ValueError(f"Campione 2b non costruibile: classi durata mancanti {missing}")
 
-    age_bands = compute_common_age_bands(subset, "classe_durata_30", duration_classes)
-
-    target_n = min(
-        int(len(subset[(subset["classe_durata_30"] == d) & (subset[ETA_COL] == a)]))
-        for d in duration_classes
-        for a in age_bands
+    selected, diag_df, meta = select_equal_rows_by_group_components(
+        subset,
+        sample_name="campione_2b_durata_1_30",
+        group_col="classe_durata_30",
+        group_values=duration_classes,
+        rng=rng,
+        ensure_province_coverage=True,
     )
-    if target_n <= 0:
-        raise ValueError("Campione 2b non costruibile: target per cella nullo")
-
-    selected_chunks = []
-    diag_rows = []
-    for d in duration_classes:
-        for a in age_bands:
-            cell = subset[(subset["classe_durata_30"] == d) & (subset[ETA_COL] == a)].copy()
-            sampled = cell.sample(n=target_n, random_state=rng.randint(0, 10**9), replace=False)
-            selected_chunks.append(sampled)
-            diag_rows.append(
-                {
-                    "campione": "campione_2b_durata_1_30",
-                    "dimensione_gruppo": "classe_durata_30",
-                    "valore_gruppo": d,
-                    "fascia_eta": a,
-                    "questionari_disponibili": int(len(cell)),
-                    "target_questionari": int(target_n),
-                    "questionari_selezionati": int(len(sampled)),
-                }
-            )
-
-    selected = pd.concat(selected_chunks, ignore_index=False)
+    selected, added_provinces, missing_provinces, extra_components_added = ensure_all_provinces_covered(
+        selected,
+        subset,
+        strata_cols=[],
+        relaxed_strata_cols=[],
+        append_only=True,
+    )
+    if missing_provinces:
+        raise ValueError(f"Campione 2b non costruibile: province non copribili {missing_provinces}")
     selected["campione"] = "campione_2b_durata_1_30"
     selected = selected.sort_values(by=["classe_durata_30", ETA_COL, "_id_text", "_row_order"], kind="mergesort")
+    final_age_bands = get_valid_values_by_components(selected, ETA_COL)
 
-    meta = {
-        "campione": "campione_2b_durata_1_30",
-        "dimensione_gruppo": "classe_durata_30",
-        "n_gruppi": len(duration_classes),
-        "n_fasce_eta": len(age_bands),
-        "target_questionari_per_cella": int(target_n),
-        "questionari_totali": int(len(selected)),
-        "classi_durata": ", ".join(duration_classes),
-        "fasce_eta": ", ".join(age_bands),
-    }
-    return selected, pd.DataFrame(diag_rows), meta
+    meta["classi_durata"] = ", ".join(duration_classes)
+    meta["componenti_totali_selezionati"] = format_number(float(selected["_componenti_num"].sum()))
+    meta["fasce_eta_presenti_finali"] = ", ".join(final_age_bands)
+    meta["province_aggiunte_per_copertura"] = ", ".join(added_provinces)
+    meta["province_non_copribili"] = ", ".join(missing_provinces)
+    meta["extra_componenti_per_copertura_province"] = format_number(extra_components_added)
+    meta["province_coperte"] = int(
+        normalize_province_series(selected[PROVINCIA_COL]).replace(NULL_VALUE, pd.NA).dropna().nunique()
+    ) if PROVINCIA_COL in selected.columns else 0
+    return selected, diag_df, meta
 
 
 def build_sample_2c(sample_2_df: pd.DataFrame, rng: random.Random):
@@ -426,27 +800,52 @@ def build_sample_2c(sample_2_df: pd.DataFrame, rng: random.Random):
     if subset.empty:
         raise ValueError("Campione 2c non costruibile: nessuna motivazione principale valorizzata")
 
-    top5 = (
-        subset[MOTIV_COL]
-        .value_counts()
-        .sort_values(ascending=False)
-        .head(5)
-        .index.astype("string")
-        .tolist()
+    top5_stats = (
+        subset.groupby(MOTIV_COL, as_index=False)
+        .agg(componenti=("_componenti_num", "sum"))
     )
+    top5_stats["_motiv_priority"] = top5_stats[MOTIV_COL].map(motivation_sort_priority_sardinia)
+    top5_stats = top5_stats.sort_values(
+        by=["componenti", "_motiv_priority", MOTIV_COL],
+        ascending=[False, True, True],
+        kind="mergesort",
+    )
+    top5 = top5_stats[MOTIV_COL].astype("string").head(5).tolist()
     if len(top5) < 5:
-        raise ValueError(f"Campione 2c non costruibile: motivazioni disponibili {len(top5)} < 5")
+        raise ValueError(
+            "Campione 2c non costruibile: motivazioni con tutte le fasce eta popolate "
+            f"{len(top5)} < 5"
+        )
 
     subset = subset[subset[MOTIV_COL].isin(top5)].copy()
 
-    selected, diag, meta = select_equal_rows_by_age(
+    selected, diag, meta = select_equal_rows_by_group_components(
         subset,
         sample_name="campione_2c_top5_motivazioni",
         group_col=MOTIV_COL,
         group_values=top5,
         rng=rng,
+        ensure_province_coverage=True,
     )
+    selected, added_provinces, missing_provinces, extra_components_added = ensure_all_provinces_covered(
+        selected,
+        subset,
+        strata_cols=[],
+        relaxed_strata_cols=[],
+        append_only=True,
+    )
+    if missing_provinces:
+        raise ValueError(f"Campione 2c non costruibile: province non copribili {missing_provinces}")
+    final_age_bands = get_valid_values_by_components(selected, ETA_COL)
     meta["top5_motivazioni_principali"] = ", ".join(top5)
+    meta["province_aggiunte_per_copertura"] = ", ".join(added_provinces)
+    meta["province_non_copribili"] = ", ".join(missing_provinces)
+    meta["extra_componenti_per_copertura_province"] = format_number(extra_components_added)
+    meta["province_coperte"] = int(
+        normalize_province_series(selected[PROVINCIA_COL]).replace(NULL_VALUE, pd.NA).dropna().nunique()
+    ) if PROVINCIA_COL in selected.columns else 0
+    meta["componenti_totali_selezionati"] = format_number(float(selected["_componenti_num"].sum()))
+    meta["fasce_eta_presenti_finali"] = ", ".join(final_age_bands)
     return selected, diag, meta
 
 
@@ -481,7 +880,7 @@ def run(input_file: Path, output_file: Path, seed: int | None = None) -> Path:
     meta_rows = [
         {"chiave": "input_file", "valore": str(input_file)},
         {"chiave": "sheet", "valore": sheet},
-        {"chiave": "record_eleggibili_senza_pacchetto", "valore": int(len(base))},
+        {"chiave": "componenti_eleggibili_senza_pacchetto", "valore": format_number(float(base["_componenti_num"].sum()))},
         {"chiave": "seed", "valore": "AUTO" if seed is None else seed},
     ]
 
@@ -516,12 +915,12 @@ def run(input_file: Path, output_file: Path, seed: int | None = None) -> Path:
             meta_df.to_excel(writer, sheet_name="meta", index=False)
 
     print(f"Input letto: {input_file}")
-    print(f"Record eleggibili senza pacchetto: {len(base)}")
-    print(f"Campione 1: {len(s1_df)}")
-    print(f"Campione 2: {len(s2_df)}")
-    print(f"Campione 2a: {len(s2a_df)}")
-    print(f"Campione 2b: {len(s2b_df)}")
-    print(f"Campione 2c: {len(s2c_df)}")
+    print(f"Componenti eleggibili senza pacchetto: {format_number(float(base['_componenti_num'].sum()))}")
+    print(f"Campione 1 - componenti: {format_number(float(s1_df['_componenti_num'].sum()))}")
+    print(f"Campione 2 - componenti: {format_number(float(s2_df['_componenti_num'].sum()))}")
+    print(f"Campione 2a - componenti: {format_number(float(s2a_df['_componenti_num'].sum()))}")
+    print(f"Campione 2b - componenti: {format_number(float(s2b_df['_componenti_num'].sum()))}")
+    print(f"Campione 2c - componenti: {format_number(float(s2c_df['_componenti_num'].sum()))}")
     print(f"Output generato: {out_path}")
     return out_path
 

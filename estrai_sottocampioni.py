@@ -133,6 +133,15 @@ def compute_group_ranking(df: pd.DataFrame, group_col: str, top_n: int) -> list[
     return [str(v) for v in values[:top_n]]
 
 
+def get_valid_values_by_components(df: pd.DataFrame, value_col: str) -> list[str]:
+    grouped = (
+        df.groupby(value_col, as_index=False)
+        .agg(componenti=("_componenti_num", "sum"))
+        .sort_values(by=[value_col], kind="mergesort")
+    )
+    return [str(r[value_col]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0]
+
+
 def build_duration_class(duration_num_series: pd.Series) -> pd.Series:
     s = pd.to_numeric(duration_num_series, errors="coerce")
     out = pd.Series(pd.NA, index=s.index, dtype="string")
@@ -265,6 +274,8 @@ def select_cell_rows_with_optimal_deviation(
     if target_components <= 0:
         return pd.Index([], dtype="int64"), 0.0
 
+    can_meet_target = float(cell_df["_componenti_num"].sum()) >= float(target_components) - 1e-9
+
     # Prima prova combinatoria esatta (quando i componenti sono interi):
     # evita undershoot/overshoot evitabili dovuti a selezione per prefissi.
     component_values = [float(v) for v in cell_df["_componenti_num"].tolist()]
@@ -287,7 +298,12 @@ def select_cell_rows_with_optimal_deviation(
         if len(parent) > 1:
             best_sum = min(
                 parent.keys(),
-                key=lambda s: (abs(s - target_int), max(s - target_int, 0), -s),
+                key=lambda s: (
+                    1 if can_meet_target and s < target_int else 0,
+                    max(s - target_int, 0),
+                    abs(s - target_int),
+                    -s,
+                ),
             )
             if best_sum > 0:
                 chosen_pos: list[int] = []
@@ -324,7 +340,11 @@ def select_cell_rows_with_optimal_deviation(
             if cumulative >= target_components:
                 break
 
-        if selected_indices and abs(cumulative_before - target_components) <= abs(cumulative - target_components):
+        if (
+            selected_indices
+            and (not can_meet_target or cumulative_before >= target_components - 1e-9)
+            and abs(cumulative_before - target_components) <= abs(cumulative - target_components)
+        ):
             selected_indices = selected_indices[:-1]
             cumulative = cumulative_before
 
@@ -333,9 +353,16 @@ def select_cell_rows_with_optimal_deviation(
         unique_comp = int(selected_components.nunique())
         std_comp = float(selected_components.std(ddof=0)) if len(selected_components) > 1 else 0.0
 
-        diff = abs(cumulative - target_components)
         overshoot = max(cumulative - target_components, 0.0)
-        key = (diff, overshoot, -unique_comp, -std_comp)
+        undershoot = max(target_components - cumulative, 0.0)
+        key = (
+            1 if can_meet_target and undershoot > 1e-9 else 0,
+            overshoot,
+            undershoot,
+            abs(cumulative - target_components),
+            -unique_comp,
+            -std_comp,
+        )
 
         if best_key is None or key < best_key:
             best_key = key
@@ -349,6 +376,7 @@ def select_cell_rows(cell_df: pd.DataFrame, target_components: float) -> tuple[p
     if target_components <= 0:
         return pd.Index([], dtype="int64"), 0.0
 
+    can_meet_target = float(cell_df["_componenti_num"].sum()) >= float(target_components) - 1e-9
     ordered = cell_df.sort_values(
         by=["_componenti_num", "_id_text", "_row_order"],
         ascending=[True, True, True],
@@ -367,7 +395,10 @@ def select_cell_rows(cell_df: pd.DataFrame, target_components: float) -> tuple[p
             break
 
     # Fallback: se il prefisso precedente e piu vicino al target, preferiscilo.
-    if selected_indices:
+    if (
+        selected_indices
+        and (not can_meet_target or cumulative_before >= target_components - 1e-9)
+    ):
         if abs(cumulative_before - target_components) <= abs(cumulative - target_components):
             selected_indices = selected_indices[:-1]
             cumulative = cumulative_before
@@ -687,18 +718,132 @@ def build_sample_1d(
     if subset.empty:
         raise ValueError("Campione 1d non costruibile: nessuna motivazione principale valorizzata.")
 
-    top5 = compute_group_ranking(subset, MOTIV_PRINC_COL, top_n=5)
-    subset = subset[subset[MOTIV_PRINC_COL].isin(top5)].copy()
-
-    selected, cell_summary, meta = extract_sample(
-        subset,
-        sample_name="Campione_1d_top5_motivazioni",
-        group_col=MOTIV_PRINC_COL,
-        group_values=top5,
-        rng=rng,
-        selection_trials=selection_trials,
+    subset["_fascia_eta_sampling"] = build_sampling_age_band(
+        subset[ETA_COL],
         merge_56_65_over65=merge_56_65_over65,
     )
+    required_age_bands = set(get_valid_values_by_components(subset, "_fascia_eta_sampling"))
+    motiv_age = (
+        subset.groupby([MOTIV_PRINC_COL, "_fascia_eta_sampling"], as_index=False)
+        .agg(componenti=("_componenti_num", "sum"))
+    )
+    motiv_valid_ages = (
+        motiv_age[motiv_age["componenti"] > 0]
+        .groupby(MOTIV_PRINC_COL)["_fascia_eta_sampling"]
+        .agg(lambda s: {str(v) for v in s.astype("string")})
+    )
+    eligible_motivations = [motiv for motiv, ages in motiv_valid_ages.items() if ages == required_age_bands]
+    top5 = compute_group_ranking(
+        subset[subset[MOTIV_PRINC_COL].isin(eligible_motivations)].copy(),
+        MOTIV_PRINC_COL,
+        top_n=5,
+    )
+    subset = subset[subset[MOTIV_PRINC_COL].isin(top5)].copy()
+
+    age_sets: list[set[str]] = []
+    for motivation in top5:
+        for group in ["ITALIANI", "STRANIERI"]:
+            cell = subset[
+                (subset[MOTIV_PRINC_COL] == motivation)
+                & (subset["macro_provenienza"] == group)
+            ]
+            grouped = cell.groupby("_fascia_eta_sampling", as_index=False).agg(componenti=("_componenti_num", "sum"))
+            valid_ages = {str(r["_fascia_eta_sampling"]) for _, r in grouped.iterrows() if float(r["componenti"]) > 0}
+            if not valid_ages:
+                raise ValueError(
+                    f"Campione 1d non costruibile: nessuna fascia eta disponibile per {motivation} / {group}."
+                )
+            age_sets.append(valid_ages)
+
+    age_bands = sorted(set.intersection(*age_sets))
+    if not age_bands:
+        raise ValueError(
+            "Campione 1d non costruibile: nessuna fascia eta comune tra top 5 motivazioni e macro_provenienza."
+        )
+
+    cell_plan: list[CellPlan] = []
+    for motivation in top5:
+        for group in ["ITALIANI", "STRANIERI"]:
+            for age_band in age_bands:
+                cell = subset[
+                    (subset[MOTIV_PRINC_COL] == motivation)
+                    & (subset["macro_provenienza"] == group)
+                    & (subset["_fascia_eta_sampling"] == age_band)
+                ]
+                cell_plan.append(
+                    CellPlan(
+                        group_value=f"{motivation}|{group}",
+                        fascia_eta=age_band,
+                        available_components=float(cell["_componenti_num"].sum()),
+                        available_questionari=int(len(cell)),
+                    )
+                )
+
+    target_components = min(cell.available_components for cell in cell_plan)
+    if target_components <= 0:
+        raise ValueError(f"Target non valido per Campione_1d_top5_motivazioni: {target_components}")
+
+    selected_indices_all: list[pd.Index] = []
+    selection_rows: list[dict[str, object]] = []
+
+    for cell in cell_plan:
+        motivation, group = str(cell.group_value).split("|", 1)
+        cell_df = subset[
+            (subset[MOTIV_PRINC_COL] == motivation)
+            & (subset["macro_provenienza"] == group)
+            & (subset["_fascia_eta_sampling"] == cell.fascia_eta)
+        ]
+        selected_idx, selected_components = select_cell_rows_with_optimal_deviation(
+            cell_df,
+            target_components,
+            rng=rng,
+            selection_trials=selection_trials,
+        )
+        selected_indices_all.append(selected_idx)
+
+        selection_rows.append(
+            {
+                "campione": "Campione_1d_top5_motivazioni",
+                "dimensione_gruppo": MOTIV_PRINC_COL,
+                "valore_gruppo": motivation,
+                "macro_provenienza": group,
+                "fascia_eta": cell.fascia_eta,
+                "componenti_disponibili": format_number(cell.available_components),
+                "questionari_disponibili": cell.available_questionari,
+                "target_componenti": format_number(target_components),
+                "componenti_selezionati": format_number(selected_components),
+                "overshoot_componenti": format_number(selected_components - target_components),
+                "questionari_selezionati": int(len(selected_idx)),
+            }
+        )
+
+    final_idx = pd.Index([], dtype="int64")
+    for idx in selected_indices_all:
+        final_idx = final_idx.append(idx)
+
+    selected = subset.loc[final_idx].copy()
+    selected["campione"] = "Campione_1d_top5_motivazioni"
+    selected["dimensione_gruppo"] = MOTIV_PRINC_COL
+    selected["strato_gruppo"] = selected[MOTIV_PRINC_COL].astype("string")
+    selected["strato_macro_provenienza"] = selected["macro_provenienza"].astype("string")
+    selected["strato_fascia_eta"] = selected["_fascia_eta_sampling"].astype("string")
+    selected = selected.sort_values(
+        by=["strato_gruppo", "strato_macro_provenienza", "strato_fascia_eta", "_id_text", "_row_order"],
+        kind="mergesort",
+    )
+
+    cell_summary = pd.DataFrame(selection_rows)
+    meta = {
+        "campione": "Campione_1d_top5_motivazioni",
+        "n_motivazioni": len(top5),
+        "n_gruppi_macro_provenienza": 2,
+        "n_fasce_eta": len(age_bands),
+        "fasce_eta": ", ".join(age_bands),
+        "merge_56_65_over65": bool(merge_56_65_over65),
+        "target_componenti_per_cella": format_number(target_components),
+        "componenti_totali_selezionati": format_number(float(selected["_componenti_num"].sum())),
+        "questionari_totali_selezionati": int(len(selected)),
+    }
     meta["top5_motivazioni_principali"] = ", ".join(top5)
     return selected, cell_summary, meta
 
@@ -715,7 +860,7 @@ def build_sample_2(
         raise ValueError("Campione 2 non costruibile: nessun paese estero disponibile.")
 
     required = set(SAMPLE_2_COUNTRIES)
-    present = set(subset[STATO_COL].dropna().astype("string").tolist())
+    present = set(get_valid_values_by_components(subset, STATO_COL))
     missing = sorted(required - present)
     if missing:
         raise ValueError(f"Campione 2 non costruibile: paesi mancanti {missing}")
@@ -745,7 +890,7 @@ def build_sample_3(
         raise ValueError("Campione 3 non costruibile: nessuna regione italiana disponibile.")
 
     required = set(SAMPLE_3_REGIONS)
-    present = set(subset[REGIONE_COL].dropna().astype("string").tolist())
+    present = set(get_valid_values_by_components(subset, REGIONE_COL))
     missing = sorted(required - present)
     if missing:
         raise ValueError(f"Campione 3 non costruibile: regioni mancanti {missing}")

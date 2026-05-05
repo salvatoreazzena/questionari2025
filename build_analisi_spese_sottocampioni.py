@@ -31,6 +31,7 @@ BASE_REQUIRED_COLUMNS = [
     "numero_componenti",
     "motivazione_principale",
     "motivazione_secondaria",
+    "giudizio",
     "web",
     *SPEND_COLUMNS,
 ]
@@ -132,6 +133,26 @@ def build_metric_tables(groups: list[tuple[dict[str, object], pd.DataFrame]]) ->
     shared_headers = ["totale", *SPEND_COLUMNS]
     leading_headers = [h for h in stp_rows[0].keys() if h not in shared_headers] if stp_rows else []
     headers = [*leading_headers, *shared_headers]
+    return [
+        {"title": "Tabella STP", "headers": headers, "rows": stp_rows},
+        {"title": "Tabella STPG", "headers": headers, "rows": stpg_rows},
+    ]
+
+
+def build_total_only_tables(groups: list[tuple[dict[str, object], pd.DataFrame]]) -> list[dict[str, object]]:
+    stp_rows: list[dict[str, object]] = []
+    stpg_rows: list[dict[str, object]] = []
+
+    for base, group_df in groups:
+        metrics = compute_metrics(group_df)
+        stp_row = dict(base)
+        stpg_row = dict(base)
+        stp_row["totale"] = metrics["stp_totale"]
+        stpg_row["totale"] = metrics["stpg_totale"]
+        stp_rows.append(stp_row)
+        stpg_rows.append(stpg_row)
+
+    headers = [*stp_rows[0].keys()] if stp_rows else ["totale"]
     return [
         {"title": "Tabella STP", "headers": headers, "rows": stp_rows},
         {"title": "Tabella STPG", "headers": headers, "rows": stpg_rows},
@@ -333,7 +354,43 @@ def build_sections_campione_1d(df: pd.DataFrame) -> list[dict[str, object]]:
                 ]
             )
         )
-    return [{"title": "1. STP e STPG per italiani, stranieri e totale in funzione della motivazione principale", "tables": motivation_tables}]
+
+    judgment_motivation_groups: list[tuple[dict[str, object], pd.DataFrame]] = []
+    judgments = sorted(v for v in df["giudizio_norm"].dropna().unique().tolist() if v != "")
+    for motivation in motivations:
+        for judgment in judgments:
+            subset = df[
+                (df["motivazione_principale_norm"] == motivation)
+                & (df["giudizio_norm"] == judgment)
+            ].copy()
+            for gruppo, group_df in [
+                ("ITALIANI", subset[subset["nazionalita_grp"] == "ITALIANI"].copy()),
+                ("STRANIERI", subset[subset["nazionalita_grp"] == "STRANIERI"].copy()),
+                ("TOTALE", subset.copy()),
+            ]:
+                if group_df.empty:
+                    continue
+                judgment_motivation_groups.append(
+                    (
+                        {
+                            "motivazione_principale": motivation,
+                            "giudizio": judgment,
+                            "gruppo": gruppo,
+                        },
+                        group_df,
+                    )
+                )
+
+    return [
+        {
+            "title": "1. STP e STPG per italiani, stranieri e totale in funzione della motivazione principale",
+            "tables": motivation_tables,
+        },
+        {
+            "title": "2. Relazione tra gradi di giudizio, motivazione principale e STP/STPG totale",
+            "tables": build_total_only_tables(judgment_motivation_groups),
+        },
+    ]
 
 
 def build_sections_campione_2(df: pd.DataFrame) -> list[dict[str, object]]:
@@ -425,6 +482,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out["regione_provenienza_norm"] = normalize_text_series(out["regione_provenienza"]).str.upper()
     out["motivazione_principale_norm"] = normalize_text_series(out["motivazione_principale"]).str.upper()
     out["motivazione_secondaria_norm"] = normalize_text_series(out["motivazione_secondaria"]).str.upper()
+    out["giudizio_norm"] = normalize_text_series(out["giudizio"]).str.upper()
     out["nazionalita_grp"] = build_nationality_group(out["stato_provenienza"])
     out["destinazione_prevalente"] = out["località_visitate"].map(extract_prevalent_destination).astype("string").fillna("").str.upper()
     out["usa_web"] = out["web"].map(uses_web_for_booking)
