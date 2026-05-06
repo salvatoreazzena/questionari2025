@@ -6,6 +6,7 @@ import unicodedata
 from pathlib import Path
 
 import pandas as pd
+from build_analisi_qualitative_campione1 import write_structured_excel
 
 DEFAULT_INPUT = Path("questionari_sardi_sottocampioni.xlsx")
 DEFAULT_OUTPUT = Path("analisi_qualitative_sardi.xlsx")
@@ -99,6 +100,13 @@ TEXT_NORMALIZATION_REPLACEMENTS = [
 ]
 
 TEXT_SPLIT_RE = re.compile(r"[;,/|\n]+|\be\b|\bed\b|\by\b", flags=re.IGNORECASE)
+
+LOCALITA_SARDEGNA_VARIANT_MAP = {
+    "S. TEODORO": "SAN TEODORO",
+    "S TEODORO": "SAN TEODORO",
+    "S. TERESA": "SANTA TERESA DI GALLURA",
+    "S TERESA": "SANTA TERESA DI GALLURA",
+}
 
 
 def normalize_text_series(series: pd.Series) -> pd.Series:
@@ -208,7 +216,12 @@ def normalize_localita_sardegna_prevalente(series: pd.Series) -> pd.Series:
     s = s.str.split(",", n=1).str[0].str.strip()
     s = s.str.replace(r"\s+", " ", regex=True)
     s = s.mask(s.eq(""), NULL_VALUE)
-    return s.astype("string").str.upper().fillna(NULL_VALUE)
+    out = s.astype("string").str.upper().fillna(NULL_VALUE)
+    out = out.replace(LOCALITA_SARDEGNA_VARIANT_MAP)
+    out_ascii = out.map(lambda value: strip_accents(str(value)) if pd.notna(value) else value)
+    out = out.mask(out.isin(LOCALITA_SARDEGNA_VARIANT_MAP.keys()), out.replace(LOCALITA_SARDEGNA_VARIANT_MAP))
+    out = out.mask(out_ascii.isin(LOCALITA_SARDEGNA_VARIANT_MAP.keys()), out_ascii.replace(LOCALITA_SARDEGNA_VARIANT_MAP))
+    return out.astype("string")
 
 
 def add_share_within_group(df: pd.DataFrame, group_cols: list[str], value_col: str = "questionari") -> pd.DataFrame:
@@ -420,15 +433,20 @@ def build_outputs(campione_1: pd.DataFrame, campione_2: pd.DataFrame) -> dict[st
         value_col="giudizio_norm",
     )
 
+    solo_sardegna_definite = solo_sardegna[
+        ~solo_sardegna["localita_sardegna_prevalente"].isin([UNDEFINED_LABEL, NULL_VALUE, ""])
+    ].copy()
+
     top15_localita = (
-        solo_sardegna.groupby("localita_sardegna_prevalente", as_index=False)
+        solo_sardegna_definite.groupby("localita_sardegna_prevalente", as_index=False)
         .agg(questionari=(ID_COL, "nunique"))
         .sort_values(by=["questionari", "localita_sardegna_prevalente"], ascending=[False, True], kind="mergesort")
         .head(15)["localita_sardegna_prevalente"]
         .tolist()
     )
-    top15_df = solo_sardegna[
-        solo_sardegna["localita_sardegna_prevalente"].isin(top15_localita) & solo_sardegna["giudizio_score"].notna()
+    top15_df = solo_sardegna_definite[
+        solo_sardegna_definite["localita_sardegna_prevalente"].isin(top15_localita)
+        & solo_sardegna_definite["giudizio_score"].notna()
     ].copy()
     outputs["c2_top15_giud_medio"] = (
         top15_df.groupby(["localita_sardegna_prevalente"], as_index=False)
@@ -476,17 +494,55 @@ def build_outputs(campione_1: pd.DataFrame, campione_2: pd.DataFrame) -> dict[st
     return outputs
 
 
+REPORT_LAYOUT_SARDI = [
+    (
+        "sintesi",
+        "Analisi qualitative sardi - sintesi",
+        [
+            ("meta", "Metadati del campione"),
+            ("c1_no_vacanza_x_prov", "Motivazioni del non fare vacanza per provincia"),
+            ("c2_destinazioni_x_prov", "Destinazioni di vacanza per provincia"),
+            ("c2_localita_sardegna", "Localita prevalente in Sardegna per provincia"),
+            ("c2_web_x_prov", "Uso del web per destinazione e provincia"),
+            ("c2_web_cosa", "Cosa viene prenotato via web"),
+        ],
+    ),
+    (
+        "motivazioni_alloggio",
+        "Analisi qualitative sardi - motivazioni e alloggio",
+        [
+            ("c2_alloggio_x_prov", "Tipologia alloggio per destinazione e provincia"),
+            ("c2_motiv_princ_x_prov", "Motivazione principale per destinazione e provincia"),
+            ("c2_spesa_mot_giud", "Spesa futura associata a motivazione e giudizio"),
+            ("c2_motiv1_motiv2", "Motivazione principale e secondaria"),
+            ("c2_giudizio_dist", "Distribuzione giudizi per destinazione e provincia"),
+        ],
+    ),
+    (
+        "top_localita",
+        "Analisi qualitative sardi - top localita",
+        [
+            ("c2_top15_giud_medio", "Top 15 localita definite per giudizio medio (escluso NON DEFINITO)"),
+            ("c2_top15_giud_x_prov", "Top 15 localita definite per giudizio medio e provincia (escluso NON DEFINITO)"),
+        ],
+    ),
+    (
+        "audit",
+        "Analisi qualitative sardi - audit",
+        [
+            ("audit_web", "Audit classificazione web"),
+        ],
+    ),
+]
+
+
 def write_excel(outputs: dict[str, pd.DataFrame], output_file: Path) -> Path:
     saved_path = output_file
     try:
-        with pd.ExcelWriter(saved_path, engine="openpyxl") as writer:
-            for sheet_name, df in outputs.items():
-                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        write_structured_excel(outputs, saved_path, REPORT_LAYOUT_SARDI)
     except PermissionError:
         saved_path = output_file.with_name(f"{output_file.stem}_nuovo{output_file.suffix}")
-        with pd.ExcelWriter(saved_path, engine="openpyxl") as writer:
-            for sheet_name, df in outputs.items():
-                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        write_structured_excel(outputs, saved_path, REPORT_LAYOUT_SARDI)
     return saved_path
 
 

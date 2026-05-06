@@ -6,11 +6,15 @@ import unicodedata
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from build_analisi_preliminare import extract_prevalent_destination
 
 DEFAULT_INPUT = Path("questionari_sottocampioni.xlsx")
 DEFAULT_OUTPUT = Path("analisi_qualitative_campione_1.xlsx")
 DEFAULT_SHEET = "campione_1"
+DEFAULT_SHEET_1D = "campione_1d"
 
 NULL_VALUE = "NULL"
 UNDEFINED_LABEL = "NON DEFINITO"
@@ -123,6 +127,70 @@ TEXT_NORMALIZATION_REPLACEMENTS = [
     (r"\btranquilit[aà]\b", "tranquillita"),
 ]
 
+DESTINATION_VARIANT_MAP = {
+    "AGHERO": "ALGHERO",
+    "ALGHERO.": "ALGHERO",
+    "BAIA SARDINIA": "BAIA SARDINIA",
+    "BAJA SARDINIA": "BAIA SARDINIA",
+    "LOIRI PORTO S. PAOLO": "LOIRI PORTO SAN PAOLO",
+    "LOIRI PORTO S PAOLO": "LOIRI PORTO SAN PAOLO",
+    "LOIRI PORTO SAN PAOLO": "LOIRI PORTO SAN PAOLO",
+    "BARI SARDO": "BARISARDO",
+    "BARISARDO": "BARISARDO",
+    "BUGERRU": "BUGGERRU",
+    "CABONIA": "CARBONIA",
+    "CAAGLIARI": "CAGLIARI",
+    "CAGLARI": "CAGLIARI",
+    "CAGLIAR": "CAGLIARI",
+    "CAGLIRI": "CAGLIARI",
+    "ORISTNO": "ORISTANO",
+    "CARDEDDU": "CARDEDU",
+    "CARLO FORTE": "CARLOFORTE",
+    "CASTELASARDO": "CASTELSARDO",
+    "CAOTERRA": "CAPOTERRA",
+    "SAN GAVINO": "SAN GAVINO MONREALE",
+    "SANT TEODORO": "SAN TEODORO",
+    "SANT'ANNA ARRSI": "SANT'ANNA ARRESI",
+    "SANT'ANTIIOCO": "SANT'ANTIOCO",
+    "SANTA TERESA": "SANTA TERESA DI GALLURA",
+    "S. TERESA DI GALLURA": "SANTA TERESA DI GALLURA",
+    "S. TERESA": "SANTA TERESA DI GALLURA",
+    "SANTA TERSA DI GALLURA": "SANTA TERESA DI GALLURA",
+    "S. TEODORO": "SAN TEODORO",
+    "S. ANTIOCO": "SANT'ANTIOCO",
+    "S. MARIA LA PALMA": "SANTA MARIA LA PALMA",
+    "S. PANTALEO": "SAN PANTALEO",
+    "QUARTU SANT' ELENA": "QUARTU SANT'ELENA",
+    "QUARTU SANT'ELANA": "QUARTU SANT'ELENA",
+    "DORGALIA": "DORGALI",
+    "DOMUS DE MARI": "DOMUS DE MARIA",
+    "LA MADDALEMA": "LA MADDALENA",
+    "ORGOSOLO": "ORGOSOLO",
+    "OROGOSOLO": "ORGOSOLO",
+    "PORTO SCUSO": "PORTOSCUSO",
+    "PORTUSCUSO": "PORTOSCUSO",
+    "PORTO TORRESE": "PORTO TORRES",
+    "SANTA MARIA NAVVARESE": "SANTA MARIA NAVARRESE",
+    "SANTA MARIA NOVARRESE": "SANTA MARIA NAVARRESE",
+    "SILIQUIA": "SILIQUA",
+    "TORTOLIE": "TORTOLI",
+    "TORTOLII": "TORTOLI",
+    "TORTOLÌ": "TORTOLI",
+    "VALLANOVA TULO": "VILLANOVATULO",
+    "VILLANOVATULO": "VILLANOVATULO",
+    "MURAVAERA": "MURAVERA",
+    "IGLIESIA": "IGLESIAS",
+    "IGLIESIAS": "IGLESIAS",
+    "TERTENITA": "TERTENIA",
+    "VILLASIMUS": "VILLASIMIUS",
+    "VIALLASIMIUS": "VILLASIMIUS",
+    "CALGIARI": "CAGLIARI",
+    "FLUMINI MAGGIORE": "FLUMINIMAGGIORE",
+    "TRINITÀ D'AGULTU E VIGNOLA": "TRINITÀ D'AGULTU",
+    "TRINITA D'AGULTU E VIGNOLA": "TRINITA D'AGULTU",
+    "TRINITA D AGULTU E VIGNOLA": "TRINITA D'AGULTU",
+}
+
 
 def normalize_text_series(series: pd.Series) -> pd.Series:
     s = series.astype("string").fillna("").str.strip()
@@ -144,6 +212,74 @@ def validate_columns(df: pd.DataFrame) -> None:
 def strip_accents(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def sanitize_location_text(raw_text: str) -> str:
+    text = raw_text.strip()
+    text = re.sub(r"(?<=[A-Za-zÀ-ÿ])(?=\d+(?:\s*(?:;|,|:|$)))", " ", text)
+    return text
+
+
+def normalize_destination_name(destination_raw: str) -> str:
+    destination_clean = re.sub(r"\s*\([^)]*\)\s*", " ", destination_raw)
+    destination_clean = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", destination_clean)
+    destination_clean = re.sub(r",\s*\d+[A-Za-z]+\d*\s*$", "", destination_clean)
+    destination_clean = re.sub(r"\s+\d+\s*$", "", destination_clean)
+    destination_clean = re.sub(r"\.+$", "", destination_clean)
+    destination_clean = re.sub(r"\s+", " ", destination_clean).strip(" ,;")
+    if not destination_clean:
+        return ""
+
+    destination_upper = destination_clean.upper()
+    destination_upper = DESTINATION_VARIANT_MAP.get(destination_upper, destination_upper)
+    if destination_upper == destination_clean.upper():
+        destination_ascii = strip_accents(destination_upper)
+        destination_upper = DESTINATION_VARIANT_MAP.get(destination_ascii, destination_upper)
+    return destination_upper
+
+
+def extract_location_without_valid_days(segment: str) -> str:
+    cleaned_segment = sanitize_location_text(segment.strip())
+    cleaned_segment = re.sub(r",\s*\d+[A-Za-z]+(?:\s*\d+)?\s*$", "", cleaned_segment)
+    cleaned_segment = re.sub(r":\s*\d+[A-Za-z]+(?:\s*\d+)?\s*$", "", cleaned_segment)
+    return normalize_destination_name(cleaned_segment)
+
+
+def extract_prevalent_destination_local(value: object) -> str:
+    pairs = extract_destination_days(value)
+    if pairs:
+        totals: dict[str, int] = {}
+        first_seen: dict[str, int] = {}
+        for idx, (dest, days) in enumerate(pairs):
+            if dest not in first_seen:
+                first_seen[dest] = idx
+            totals[dest] = totals.get(dest, 0) + days
+
+        positive_totals = {dest: total for dest, total in totals.items() if total > 0}
+        if positive_totals:
+            return min(
+                positive_totals.keys(),
+                key=lambda k: (-positive_totals[k], first_seen[k], k),
+            )
+        return pairs[0][0]
+
+    prevalent = extract_prevalent_destination(value)
+    if prevalent == NULL_VALUE:
+        if pd.isna(value):
+            return NULL_VALUE
+        raw_text = str(value).strip()
+        if not raw_text or raw_text.upper() == NULL_VALUE:
+            return NULL_VALUE
+        raw_text = sanitize_location_text(raw_text)
+        if raw_text.startswith("(") and raw_text.endswith(")"):
+            raw_text = raw_text[1:-1].strip()
+        if ";" not in raw_text:
+            single_destination = normalize_destination_name(raw_text)
+            if single_destination:
+                return single_destination
+        return NULL_VALUE
+
+    return normalize_destination_name(prevalent)
 
 
 def normalize_free_text(value: object) -> str:
@@ -196,7 +332,7 @@ def extract_destination_days(value: object) -> list[tuple[str, int]]:
     if pd.isna(value):
         return []
 
-    raw_text = str(value).strip()
+    raw_text = sanitize_location_text(str(value).strip())
     if not raw_text or raw_text.upper() == NULL_VALUE:
         return []
 
@@ -204,7 +340,7 @@ def extract_destination_days(value: object) -> list[tuple[str, int]]:
         raw_text = raw_text[1:-1].strip()
 
     pair_pattern = re.compile(
-        r"\s*([^\d,;:][^,;:]*?)\s*(?:,+\s*|:\s*|\s+)([0-9]+(?:[.,][0-9]+)?)(?![A-Za-z])\s*(?=;|,|:|$)"
+        r"\s*([^\d,;:][^,;:]*?)\s*(?:,+\s*|:\s*|\s*)?([0-9]+(?:[.,][0-9]+)?)(?![A-Za-z])\s*(?=;|,|:|$)"
     )
     matches = list(pair_pattern.finditer(raw_text))
 
@@ -212,10 +348,10 @@ def extract_destination_days(value: object) -> list[tuple[str, int]]:
     for match in matches:
         destination_raw = match.group(1).strip()
         days_raw = match.group(2).strip()
-        destination_clean = re.sub(r"\s*\([^)]*\)\s*", " ", destination_raw)
-        destination_clean = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", destination_clean)
-        destination_clean = re.sub(r"\s+", " ", destination_clean).strip(" ,;")
+        destination_clean = normalize_destination_name(destination_raw)
         if not destination_clean:
+            continue
+        if destination_clean[0].isdigit():
             continue
         try:
             days_float = float(days_raw.replace(",", "."))
@@ -226,17 +362,32 @@ def extract_destination_days(value: object) -> list[tuple[str, int]]:
         days_int = int(days_float)
         if days_int < 0:
             continue
-        results.append((destination_clean.upper(), days_int))
+        results.append((destination_clean, days_int))
+
+    if ";" in raw_text:
+        parsed_destinations = {dest for dest, _ in results}
+        for segment in raw_text.split(";"):
+            segment = segment.strip()
+            if not segment:
+                continue
+            strict_match = re.fullmatch(
+                r"\s*([^\d,;:][^,;:]*?)\s*(?:,+\s*|:\s*|\s*)?([0-9]+(?:[.,][0-9]+)?)\s*",
+                segment,
+            )
+            if strict_match:
+                continue
+            fallback_destination = extract_location_without_valid_days(segment)
+            if fallback_destination and fallback_destination not in parsed_destinations:
+                results.append((fallback_destination, 0))
+                parsed_destinations.add(fallback_destination)
 
     if results:
         return results
 
     if ";" not in raw_text and not re.search(r"\d", raw_text):
-        single_destination = re.sub(r"\s*\([^)]*\)\s*", " ", raw_text)
-        single_destination = re.sub(r"^(?:\s*\d+\s*:\s*)+", "", single_destination)
-        single_destination = re.sub(r"\s+", " ", single_destination).strip(" ,;")
+        single_destination = normalize_destination_name(raw_text)
         if single_destination:
-            return [(single_destination.upper(), 1)]
+            return [(single_destination, 1)]
 
     return []
 
@@ -249,7 +400,7 @@ def build_destination_metrics(locations_series: pd.Series) -> pd.DataFrame:
     for value in locations_series.tolist():
         pairs = extract_destination_days(value)
         if not pairs:
-            prevalent.append(extract_prevalent_destination(value))
+            prevalent.append(extract_prevalent_destination_local(value))
             unique_positive_counts.append(0)
             travel_type.append(UNDEFINED_LABEL)
             continue
@@ -264,27 +415,27 @@ def build_destination_metrics(locations_series: pd.Series) -> pd.DataFrame:
             if days > 0:
                 positive_destinations.append(dest)
 
-        if not totals:
-            prevalent.append(extract_prevalent_destination(value))
-            unique_positive_counts.append(0)
-            travel_type.append(UNDEFINED_LABEL)
-            continue
-
-        prev = extract_prevalent_destination(value)
+        prev = extract_prevalent_destination_local(value)
         if prev == NULL_VALUE:
             prev = UNDEFINED_LABEL
         if prev not in totals:
             prev = min(totals.keys(), key=lambda k: (-totals[k], first_seen[k], k))
         positive_unique = len(dict.fromkeys(positive_destinations))
+        total_unique = len(totals)
 
         prevalent.append(prev)
-        unique_positive_counts.append(positive_unique)
         if positive_unique <= 0:
-            travel_type.append(UNDEFINED_LABEL)
-        elif positive_unique == 1:
-            travel_type.append("STANZIALE")
+            unique_positive_counts.append(total_unique)
+            if total_unique <= 1:
+                travel_type.append("STANZIALE")
+            else:
+                travel_type.append("ITINERANTE")
         else:
-            travel_type.append("ITINERANTE")
+            unique_positive_counts.append(positive_unique)
+            if positive_unique == 1:
+                travel_type.append("STANZIALE")
+            else:
+                travel_type.append("ITINERANTE")
 
     return pd.DataFrame(
         {
@@ -304,6 +455,19 @@ def normalize_yes_no(series: pd.Series) -> pd.Series:
     out = pd.Series(UNDEFINED_LABEL, index=upper.index, dtype="string")
     out = out.mask(upper.isin({"SI", "SÌ"}), "SI")
     out = out.mask(upper.eq("NO"), "NO")
+    return out
+
+
+def split_apprezzamenti_1d(text: str) -> list[str]:
+    parts = re.split(r"[;,/|]+", text)
+    out: list[str] = []
+    for part in parts:
+        cleaned = re.sub(r"\s+", " ", part).strip(" .:-")
+        if not cleaned:
+            continue
+        if cleaned.upper() in {t.upper() for t in NULL_TOKENS}:
+            continue
+        out.append(cleaned.title())
     return out
 
 
@@ -630,11 +794,11 @@ def prepare_dataframe(input_file: Path, sheet_name: str) -> pd.DataFrame:
     return df
 
 
-def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def build_outputs(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
     outputs: dict[str, pd.DataFrame] = {}
 
     meta_rows = [
-        {"chiave": "sheet_campione", "valore": DEFAULT_SHEET},
+        {"chiave": "sheet_campione", "valore": sheet_name},
         {"chiave": "questionari_totali", "valore": int(df[ID_COL].nunique())},
         {"chiave": "componenti_totali", "valore": int(df[COMPONENTS_COL].sum())},
         {"chiave": "italiani_questionari", "valore": int(df["macro_provenienza"].eq("ITALIANI").sum())},
@@ -826,17 +990,233 @@ def build_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return outputs
 
 
+def prepare_dataframe_1d(input_file: Path, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(input_file, sheet_name=sheet_name)
+    required = [STATE_COL, PRIMARY_REASON_COL, STRENGTHS_COL, COMPONENTS_COL]
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(f"Colonne mancanti nel foglio {sheet_name}: {missing}")
+
+    out = df.copy()
+    out[PRIMARY_REASON_COL] = normalize_text_series(out[PRIMARY_REASON_COL]).str.upper()
+    out[STRENGTHS_COL] = normalize_text_series(out[STRENGTHS_COL])
+    out["macro_provenienza"] = build_macro_provenienza(out[STATE_COL])
+    out[COMPONENTS_COL] = pd.to_numeric(out[COMPONENTS_COL], errors="coerce").fillna(0)
+    return out
+
+
+def build_outputs_1d(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
+    outputs: dict[str, pd.DataFrame] = {}
+    meta_rows = [
+        {"chiave": "sheet_campione", "valore": sheet_name},
+        {"chiave": "questionari_totali", "valore": int(len(df))},
+        {"chiave": "questionari_con_apprezzamenti", "valore": int(((df[PRIMARY_REASON_COL] != "") & (df[STRENGTHS_COL] != "")).sum())},
+        {"chiave": "componenti_totali", "valore": int(df[COMPONENTS_COL].sum())},
+    ]
+    outputs["c1d_meta"] = pd.DataFrame(meta_rows)
+
+    working = df[(df[PRIMARY_REASON_COL] != "") & (df[STRENGTHS_COL] != "")].copy()
+    rows: list[dict[str, object]] = []
+    for _, row in working.iterrows():
+        elementi = split_apprezzamenti_1d(str(row[STRENGTHS_COL]))
+        if not elementi:
+            continue
+        for elemento in elementi:
+            rows.append(
+                {
+                    "macro_provenienza": row["macro_provenienza"],
+                    PRIMARY_REASON_COL: row[PRIMARY_REASON_COL],
+                    "elemento_apprezzamento": elemento,
+                    "questionari": 1,
+                    "componenti": float(row[COMPONENTS_COL]),
+                }
+            )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        outputs["c1d_top_apprezzamenti"] = pd.DataFrame(
+            columns=["macro_provenienza", PRIMARY_REASON_COL, "elemento_apprezzamento", "questionari", "componenti", "rank_nel_gruppo"]
+        )
+        outputs["c1d_dettaglio_completo"] = outputs["c1d_top_apprezzamenti"].copy()
+        return outputs
+
+    grouped = (
+        out.groupby(["macro_provenienza", PRIMARY_REASON_COL, "elemento_apprezzamento"], as_index=False)
+        .agg(questionari=("questionari", "sum"), componenti=("componenti", "sum"))
+    )
+    grouped["componenti"] = grouped["componenti"].round(0).astype(int)
+    grouped = grouped.sort_values(
+        by=["macro_provenienza", PRIMARY_REASON_COL, "questionari", "componenti", "elemento_apprezzamento"],
+        ascending=[True, True, False, False, True],
+        kind="mergesort",
+    )
+    grouped["rank_nel_gruppo"] = grouped.groupby(["macro_provenienza", PRIMARY_REASON_COL]).cumcount() + 1
+
+    outputs["c1d_top_apprezzamenti"] = grouped[grouped["rank_nel_gruppo"] <= 10].copy()
+    outputs["c1d_dettaglio_completo"] = grouped
+    return outputs
+
+
+REPORT_LAYOUT = [
+    (
+        "sintesi",
+        "Analisi qualitative - sintesi",
+        [
+            ("meta", "Metadati del campione"),
+            ("web_prenotazione", "Uso del web per la prenotazione"),
+            ("stanziale_itinerante", "Turismo stanziale o itinerante"),
+            ("arrivi_x_destinazione", "Arrivo in Sardegna per destinazione prevalente"),
+            ("alloggio_prevalente", "Tipologia di alloggio prevalente"),
+            ("motivazione_x_alloggio", "Tipologia di alloggio per motivazione principale"),
+        ],
+    ),
+    (
+        "destinazioni_motivazioni",
+        "Analisi qualitative - destinazioni e motivazioni",
+        [
+            ("dest_top10_provenienze", "Top 10 provenienze associate per destinazione"),
+            ("dest_top_motivazioni", "Top motivazioni principali per destinazione"),
+            ("top20_dest_x_motivaz", "Top 20 destinazioni per motivazione principale"),
+            ("motivaz_prim_second", "Motivazione principale per motivazione secondaria"),
+            ("spesa_futura_assoc", "Associazioni con previsione di spesa futura"),
+            ("giudizio_distrib", "Distribuzione giudizi per provenienza ed età"),
+            ("giudizio_top15_dest", "Giudizio medio top 15 destinazioni"),
+        ],
+    ),
+    (
+        "testi_aperti",
+        "Analisi qualitative - testi aperti",
+        [
+            ("web_cosa_prenotata", "Cosa viene prenotato via web"),
+            ("web_dettagli_top20", "Top 20 frammenti web"),
+            ("punti_forza_temi", "Temi dei punti di forza"),
+            ("punti_forza_top20", "Top 20 frammenti punti di forza"),
+            ("dissenso_temi", "Temi del dissenso"),
+            ("dissenso_top20", "Top 20 frammenti del dissenso"),
+            ("dissenso_dettaglio", "Dettaglio questionari con dissenso"),
+        ],
+    ),
+    (
+        "audit",
+        "Analisi qualitative - audit classificazioni",
+        [
+            ("audit_web", "Audit classificazione web"),
+            ("audit_apprezzamenti", "Audit classificazione apprezzamenti"),
+            ("audit_dissenso", "Audit classificazione dissenso"),
+        ],
+    ),
+    (
+        "campione_1d",
+        "Analisi qualitative - campione 1d",
+        [
+            ("c1d_meta", "Metadati campione 1d"),
+            ("c1d_top_apprezzamenti", "Top 10 apprezzamenti per provenienza e motivazione"),
+            ("c1d_dettaglio_completo", "Dettaglio completo apprezzamenti campione 1d"),
+        ],
+    ),
+]
+
+
+def format_cell_value(value: object) -> object:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, float):
+        return round(value, 2)
+    return value
+
+
+def style_worksheet(ws) -> None:
+    title_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+    section_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    header_fill = PatternFill(fill_type="solid", fgColor="EAF2F8")
+    title_font = Font(bold=True, size=14, color="FFFFFF")
+    section_font = Font(bold=True, size=12)
+    header_font = Font(bold=True)
+
+    max_widths: dict[int, int] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value in (None, ""):
+                continue
+
+            if cell.row == 1 and cell.column == 1:
+                cell.fill = title_fill
+                cell.font = title_font
+                cell.alignment = Alignment(horizontal="left")
+            elif isinstance(cell.value, str) and cell.value.startswith("Tabella: "):
+                cell.font = section_font
+                cell.fill = section_fill
+            elif cell.row > 1 and cell.column == 1 and isinstance(cell.value, str) and cell.value.startswith("Sezione: "):
+                cell.font = section_font
+            elif cell.font and cell.font.bold and cell.row > 1:
+                cell.fill = header_fill
+                cell.font = header_font
+
+            text_length = len(str(cell.value))
+            max_widths[cell.column] = min(max(max_widths.get(cell.column, 0), text_length + 2), 45)
+
+    for col_idx, width in max_widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(14, width)
+
+    ws.freeze_panes = "A2"
+
+
+def write_table(ws, start_row: int, title: str, df: pd.DataFrame) -> int:
+    ws.cell(row=start_row, column=1, value=f"Tabella: {title}")
+    start_row += 1
+
+    if df.empty:
+        ws.cell(row=start_row, column=1, value="Nessun dato disponibile")
+        return start_row + 2
+
+    headers = list(df.columns)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=start_row, column=col_idx, value=header)
+        cell.font = Font(bold=True)
+    start_row += 1
+
+    for _, data_row in df.iterrows():
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=start_row, column=col_idx, value=format_cell_value(data_row[header]))
+            if header == "pct_su_gruppo" and cell.value != "":
+                cell.number_format = "0.00"
+        start_row += 1
+
+    return start_row + 2
+
+
+def write_structured_excel(
+    outputs: dict[str, pd.DataFrame],
+    output_file: Path,
+    report_layout: list[tuple[str, str, list[tuple[str, str]]]],
+) -> None:
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    for sheet_name, sheet_title, table_specs in report_layout:
+        ws = wb.create_sheet(title=sheet_name[:31])
+        ws.cell(row=1, column=1, value=sheet_title)
+        row_idx = 3
+
+        for key, table_title in table_specs:
+            if key not in outputs:
+                continue
+            row_idx = write_table(ws, row_idx, table_title, outputs[key])
+
+        style_worksheet(ws)
+
+    wb.save(output_file)
+
+
 def write_excel(outputs: dict[str, pd.DataFrame], output_file: Path) -> None:
-    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-        for sheet_name, df in outputs.items():
-            safe_name = sheet_name[:31]
-            df.to_excel(writer, sheet_name=safe_name, index=False)
+    write_structured_excel(outputs, output_file, REPORT_LAYOUT)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Costruisce le analisi qualitative del Campione 1.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help=f"File input Excel (default: {DEFAULT_INPUT})")
     parser.add_argument("--sheet", default=DEFAULT_SHEET, help=f"Foglio da analizzare (default: {DEFAULT_SHEET})")
+    parser.add_argument("--sheet-1d", default=DEFAULT_SHEET_1D, help=f"Foglio campione 1d da includere (default: {DEFAULT_SHEET_1D})")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help=f"File output Excel (default: {DEFAULT_OUTPUT})")
     return parser.parse_args()
 
@@ -847,7 +1227,9 @@ def main() -> None:
         raise FileNotFoundError(f"File non trovato: {args.input}")
 
     df = prepare_dataframe(args.input, args.sheet)
-    outputs = build_outputs(df)
+    outputs = build_outputs(df, args.sheet)
+    df_1d = prepare_dataframe_1d(args.input, args.sheet_1d)
+    outputs.update(build_outputs_1d(df_1d, args.sheet_1d))
     write_excel(outputs, args.output)
     print(f"Analisi qualitative Campione 1 salvate in: {args.output}")
 
