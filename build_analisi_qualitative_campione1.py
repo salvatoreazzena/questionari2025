@@ -119,7 +119,7 @@ SENTIMENT_THEME_DEFINITIONS: list[tuple[str, str]] = [
     ),
     (
         "Accoglienza e ospitalità",
-        "valutazioni relative alla cordialità degli operatori turistici, alla disponibilità della popolazione locale, al clima relazionale",
+        "valutazioni relative alla cordialità degli operatori turistici, alla disponibilità della popolazione locale, dei residenti e dei sardi, al clima relazionale",
     ),
     (
         "Enogastronomia",
@@ -165,7 +165,7 @@ SENTIMENT_THEME_LABEL_MAP = {
 
 EXPLICIT_THEME_PATTERNS: list[tuple[str, str]] = [
     ("Mare e paesaggio", r"\b(mare|spiagg\w*|litor\w*|costa|costier\w*|scoglier\w*|calett\w*|panoram\w*|paesagg\w*|natur\w*)\b"),
-    ("Accoglienza e ospitalità", r"\b(accoglienz\w*|ospitalit\w*|ospital\w*|gentilezz\w*|cordial\w*|disponibil\w*|relazional\w*)\b"),
+    ("Accoglienza e ospitalità", r"\b(accoglienz\w*|ospitalit\w*|ospital\w*|gentilezz\w*|cordial\w*|disponibil\w*|relazional\w*|resident\w*|abitant\w*|popolazion\w* locale|gente del posto|persone del posto|sard(?:o|a|i|e))\b"),
     ("Enogastronomia", r"\b(cibo|cucin\w*|mang\w*|ristoran\w*|gastron\w*|enogastr\w*|prodott\w* locali|piatt\w* tipic\w*)\b"),
     ("Clima", r"\b(clima|meteo|temperatur\w*|vento|soleggiat\w*|caldo|fresc\w*|umid\w*|pioggi\w*)\b"),
     ("Autenticità dei luoghi", r"\b(autentic\w*|tradizion\w*|identit\w*|cultural\w*|borg\w*|tipic\w*|genuin\w*)\b"),
@@ -716,12 +716,6 @@ def canonicalize_token(token: str) -> str:
         return TOKEN_NORMALIZATION_MAP[token]
     if any(token.endswith(ending) for ending in INVARIABLE_TOKEN_ENDINGS):
         return token
-    if len(token) <= 3:
-        return token
-    if token.endswith("ie") and len(token) > 4:
-        return token[:-2] + "ia"
-    if token.endswith("i") and len(token) > 4:
-        return token[:-1] + "o"
     return token
 
 
@@ -1040,17 +1034,17 @@ def build_open_text_outputs(
             base.update({tema_col_name: theme, ID_COL: row[ID_COL], COMPONENTS_COL: row[COMPONENTS_COL]})
             summary_rows.append(base)
 
-        seen_pairs: set[tuple[str, str]] = set()
+        seen_themes: set[str] = set()
         for item in audit_fragments:
-            pair = (item["frammento"], item["tema"])
-            if pair in seen_pairs:
+            theme = item["tema"]
+            if theme in seen_themes:
                 continue
-            seen_pairs.add(pair)
+            seen_themes.add(theme)
             base = {col: row[col] for col in group_cols}
             base.update(
                 {
                     "frammento": item["frammento"],
-                    tema_col_name: item["tema"],
+                    tema_col_name: theme,
                     ID_COL: row[ID_COL],
                     COMPONENTS_COL: row[COMPONENTS_COL],
                 }
@@ -1171,12 +1165,6 @@ def build_ml_open_text_outputs(
         for item in audit_fragments:
             audit_rows.append({**base_audit, **item})
 
-        response_theme_scores: dict[str, float] = {}
-        for item in audit_fragments:
-            theme = str(item["tema"])
-            score = float(item["score_modello"])
-            response_theme_scores[theme] = max(response_theme_scores.get(theme, 0.0), score)
-
         for theme in response_themes:
             base = {col: row[col] for col in group_cols}
             base.update(
@@ -1188,13 +1176,16 @@ def build_ml_open_text_outputs(
             )
             summary_rows.append(base)
 
-        seen_pairs_scores: dict[tuple[str, str], float] = {}
+        best_fragment_by_theme: dict[str, tuple[str, float]] = {}
         for item in audit_fragments:
-            pair = (item["frammento"], item["tema"])
-            seen_pairs_scores[pair] = max(seen_pairs_scores.get(pair, 0.0), float(item["score_modello"]))
+            tema = str(item["tema"])
+            frammento = str(item["frammento"])
+            score = float(item["score_modello"])
+            current = best_fragment_by_theme.get(tema)
+            if current is None or score > current[1]:
+                best_fragment_by_theme[tema] = (frammento, score)
 
-        for pair, score in seen_pairs_scores.items():
-            frammento, tema = pair
+        for tema, (frammento, _score) in best_fragment_by_theme.items():
             base = {col: row[col] for col in group_cols}
             base.update(
                 {
