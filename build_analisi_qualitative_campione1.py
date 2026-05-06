@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from tqdm.auto import tqdm
 from build_analisi_preliminare import extract_prevalent_destination
 
 DEFAULT_INPUT = Path("questionari_sottocampioni.xlsx")
@@ -18,7 +21,7 @@ DEFAULT_SHEET_1D = "campione_1d"
 
 NULL_VALUE = "NULL"
 UNDEFINED_LABEL = "NON DEFINITO"
-NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A."}
+NULL_TOKENS = {"", "ND", "NR", "NA", "N/D", "N.R.", "N.A.", "NULL", "NULLO", "VUOTO", "VUOTA"}
 
 ID_COL = "ID"
 AGE_COL = "fascia_età"
@@ -69,6 +72,9 @@ TEXT_SPLIT_RE = re.compile(r"[;,/|\n]+|\be\b|\bed\b|\by\b", flags=re.IGNORECASE)
 NEGATION_PATTERNS = [
     r"\b(nulla|niente|nessuno|nessuna|no|non saprei|non so|na|nd|nr)\b",
     r"\b(nulla da migliorare|niente da migliorare|va bene cosi|va bene cosi'|tutto bene|nessun miglioramento)\b",
+    r"^\s*(tutto|tutta|tutti|tutte)\s*$",
+    r"^\s*(niente|nulla)\s*$",
+    r"^\s*(tutto quanto|tutto q\.?to|tutto ok|tutto perfetto)\s*$",
 ]
 WEB_NEGATION_PATTERNS = [
     r"\b(non ho prenotato|nessuna prenotazione|non prenotato|non usato il web)\b",
@@ -106,12 +112,179 @@ WEAKNESS_PATTERNS: list[tuple[str, str]] = [
     ("SPIAGGE/ACCESSIBILITA", r"\b(spiagg\w*|access\w*|accessibil\w*|prenotazion\w*|barrier\w* architettonic\w*)\b"),
 ]
 
+SENTIMENT_THEME_DEFINITIONS: list[tuple[str, str]] = [
+    (
+        "Mare e paesaggio",
+        "riferimenti espliciti alla bellezza del mare, alla qualità delle spiagge, ai paesaggi costieri e naturali",
+    ),
+    (
+        "Accoglienza e ospitalità",
+        "valutazioni relative alla cordialità degli operatori turistici, alla disponibilità della popolazione locale, al clima relazionale",
+    ),
+    (
+        "Enogastronomia",
+        "giudizi sulla qualità dei prodotti alimentari locali, sull’autenticità della cucina tradizionale, sulla varietà dell’offerta gastronomica",
+    ),
+    (
+        "Clima",
+        "riferimenti alle condizioni meteorologiche e climatiche",
+    ),
+    (
+        "Autenticità dei luoghi",
+        "percezione dell’autenticità culturale, della preservazione delle tradizioni, dell’identità territoriale",
+    ),
+    (
+        "Rapporto qualità/prezzo",
+        "valutazioni comparative tra il livello dei servizi fruiti e i costi sostenuti",
+    ),
+    (
+        "Servizi turistici",
+        "giudizi sull’organizzazione complessiva dei servizi, come informazione turistica, segnaletica, accessibilità, pulizia",
+    ),
+    (
+        "Infrastrutture e viabilità",
+        "valutazioni sulla qualità delle strade, sulla disponibilità di parcheggi, sull’adeguatezza delle infrastrutture",
+    ),
+    (
+        "Costi elevati",
+        "segnalazioni esplicite di prezzi ritenuti eccessivi o non proporzionati al servizio ricevuto",
+    ),
+    (
+        "Carenze nei servizi",
+        "indicazioni di disservizi, mancanza di servizi attesi, inefficienze organizzative",
+    ),
+]
+
+SENTIMENT_THEME_LABELS = [label for label, _ in SENTIMENT_THEME_DEFINITIONS]
+SENTIMENT_THEME_CANDIDATES = [
+    f"{label} - {description}" for label, description in SENTIMENT_THEME_DEFINITIONS
+]
+SENTIMENT_THEME_LABEL_MAP = {
+    candidate: label for (label, _), candidate in zip(SENTIMENT_THEME_DEFINITIONS, SENTIMENT_THEME_CANDIDATES)
+}
+
+EXPLICIT_THEME_PATTERNS: list[tuple[str, str]] = [
+    ("Mare e paesaggio", r"\b(mare|spiagg\w*|litor\w*|costa|costier\w*|scoglier\w*|calett\w*|panoram\w*|paesagg\w*|natur\w*)\b"),
+    ("Accoglienza e ospitalità", r"\b(accoglienz\w*|ospitalit\w*|ospital\w*|gentilezz\w*|cordial\w*|disponibil\w*|relazional\w*)\b"),
+    ("Enogastronomia", r"\b(cibo|cucin\w*|mang\w*|ristoran\w*|gastron\w*|enogastr\w*|prodott\w* locali|piatt\w* tipic\w*)\b"),
+    ("Clima", r"\b(clima|meteo|temperatur\w*|vento|soleggiat\w*|caldo|fresc\w*|umid\w*|pioggi\w*)\b"),
+    ("Autenticità dei luoghi", r"\b(autentic\w*|tradizion\w*|identit\w*|cultural\w*|borg\w*|tipic\w*|genuin\w*)\b"),
+    ("Rapporto qualità/prezzo", r"\b(qualit[aà]\s*/?\s*prezzo|rapporto qualit[aà]|buon prezzo|prezzo giusto|convenient\w*|caro ma)\b"),
+    ("Servizi turistici", r"\b(segnaletic\w*|informazion\w* turistic\w*|ufficio turistico|accessibil\w*|pulizi\w*|serviz\w* turistic\w*|organizzazion\w*)\b"),
+    ("Infrastrutture e viabilità", r"\b(strad\w*|viabil\w*|parchegg\w*|infrastruttur\w*|collegament\w*|traffico|asfalt\w*)\b"),
+    ("Costi elevati", r"\b(prezz\w* alt\w*|cost\w* eccessiv\w*|troppo car\w*|carissim\w*|prezzi eccessiv\w*)\b"),
+    ("Carenze nei servizi", r"\b(disserviz\w*|mancanz\w* di servizi|servizi assenti|inefficien\w*|servizi carent\w*|manca\w*)\b"),
+]
+
+DEFAULT_ZERO_SHOT_MODEL = os.environ.get("QUAL_SENTIMENT_MODEL", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
+ZERO_SHOT_FALLBACK_MODELS = [
+    DEFAULT_ZERO_SHOT_MODEL,
+    "joeddav/xlm-roberta-large-xnli",
+]
+DEFAULT_ZERO_SHOT_THRESHOLD = float(os.environ.get("QUAL_SENTIMENT_THRESHOLD", "0.30"))
+DEFAULT_ZERO_SHOT_MAX_LABELS = int(os.environ.get("QUAL_SENTIMENT_MAX_LABELS", "1"))
+DEFAULT_ZERO_SHOT_BATCH_SIZE = int(os.environ.get("QUAL_SENTIMENT_BATCH_SIZE", "16"))
+ZERO_SHOT_HYPOTHESIS_TEMPLATE = "Questo testo riguarda {}."
+ZERO_SHOT_METHOD_LABEL = "regola_esplicita_più_ml_zero_shot_huggingface"
+HF_CACHE_DIR = Path(os.environ.get("HF_HOME", Path(__file__).resolve().parent / ".hf_cache"))
+
 STOPWORDS = {
     "il", "lo", "la", "i", "gli", "le", "un", "una", "uno", "di", "a", "da", "in", "su", "per", "con",
     "del", "della", "dello", "dei", "degli", "delle", "al", "alla", "allo", "ai", "agli", "alle", "ed",
     "e", "o", "the", "and", "to", "of", "is", "are", "non", "piu", "più", "molto", "molti", "molte",
     "nulla", "niente", "tutto", "tutti", "tutte", "same", "good", "nice", "very",
 }
+
+LEADING_FILLER_PATTERNS = [
+    r"^(?:il|lo|la|i|gli|le|un|uno|una|l)\s+",
+    r"^(?:l')",
+    r"^(?:del|della|dello|dei|degli|delle|al|allo|alla|ai|agli|alle|dal|dallo|dalla|dai|dagli|dalle)\s+",
+    r"^(?:di|da|da parte di|con|per|su|in)\s+",
+    r"^(?:mi e piaciut\w*|ho apprezzat\w*|mi sono piaciut\w*|bella\b|bello\b|belli\b|belle\b|ottim\w*|buon\w*)\s+",
+]
+
+FRAGMENT_LEADING_PATTERNS = [
+    r"^(?:mi e piaciut\w*|mi sono piaciut\w*|mi piace\w*|ho apprezzat\w*|ho gradit\w*|ho amat\w*|ador\w*|amo)\s+",
+    r"^(?:mi sono trovat\w* bene|mi son trovat\w* bene|mi sono trovat\w* benissimo|mi son trovat\w* benissimo)\s+",
+    r"^(?:quello che ho apprezzato di piu|quello che mi e piaciuto di piu|la cosa migliore|la cosa piu bella|la cosa che mi e piaciuta di piu)\s+",
+    r"^(?:molto |davvero |veramente |particolarmente |soprattutto )+",
+]
+
+FRAGMENT_TRAILING_PATTERNS = [
+    r"\s+(?:bellissim\w*|stupend\w*|splendid\w*|fantastic\w*|meraviglios\w*|ottim\w*|buon\w*|eccellent\w*|top)$",
+]
+
+GENERIC_FRAGMENT_TOKENS = {
+    "bello", "bella", "belli", "belle", "bellissimo", "bellissima", "bellissimi", "bellissime",
+    "buono", "buona", "buoni", "buone", "ottimo", "ottima", "ottimi", "ottime",
+    "stupendo", "stupenda", "stupendi", "stupende", "fantastico", "fantastica", "fantastici", "fantastiche",
+    "molto", "davvero", "veramente", "particolarmente", "soprattutto",
+}
+
+TOKEN_NORMALIZATION_MAP = {
+    "spiagge": "spiaggia",
+    "spiaggia": "spiaggia",
+    "mari": "mare",
+    "paesaggi": "paesaggio",
+    "coste": "costa",
+    "costieri": "costiero",
+    "costiere": "costiero",
+    "naturali": "naturale",
+    "operatori": "operatore",
+    "operatori turistici": "operatore turistico",
+    "prodotti": "prodotto",
+    "prodotti locali": "prodotto locale",
+    "piatti": "piatto",
+    "piatti tipici": "piatto tipico",
+    "tradizioni": "tradizione",
+    "luoghi": "luogo",
+    "servizi": "servizio",
+    "servizi turistici": "servizio turistico",
+    "strade": "strada",
+    "parcheggi": "parcheggio",
+    "infrastrutture": "infrastruttura",
+    "prezzi": "prezzo",
+    "costi": "costo",
+    "disservizi": "disservizio",
+    "inefficienze": "inefficienza",
+    "carenze": "carenza",
+    "cordiali": "cordiale",
+    "gentili": "gentile",
+    "disponibili": "disponibile",
+    "costose": "costoso",
+    "costosi": "costoso",
+    "costosa": "costoso",
+    "cari": "caro",
+    "care": "caro",
+    "cara": "caro",
+    "autentica": "autentico",
+    "autentici": "autentico",
+    "autentiche": "autentico",
+    "turistiche": "turistico",
+    "turistici": "turistico",
+    "turistica": "turistico",
+}
+
+PHRASE_NORMALIZATION_MAP = {
+    "prodotti locali": "prodotto locale",
+    "piatti tipici": "piatto tipico",
+    "servizi turistici": "servizio turistico",
+    "operatori turistici": "operatore turistico",
+}
+
+INVARIABLE_TOKEN_ENDINGS = (
+    "zione", "zioni", "mente", "ita", "ista", "iste", "isti", "ale", "ali", "ile", "ili",
+)
+
+NON_INFORMATIVE_EXACT_PATTERNS = [
+    r"^\s*$",
+    r"^\s*(null|nulla|nullo|nullo|vuoto|vuota|nessuna risposta|nessun commento)\s*$",
+    r"^\s*(tutto|tutta|tutti|tutte)\s*$",
+    r"^\s*(niente|nulla)\s*$",
+    r"^\s*(tutto bene|tutto ok|tutto perfetto|tutto bellissimo|tutto bello)\s*$",
+    r"^\s*(niente da migliorare|nulla da migliorare|nessun miglioramento)\s*$",
+    r"^\s*(boh|non so|non saprei)\s*$",
+]
 
 TEXT_NORMALIZATION_REPLACEMENTS = [
     (r"\bb b\b", "b&b"),
@@ -494,7 +667,7 @@ def split_text_fragments(text: str) -> list[str]:
         return []
     fragments = []
     for part in TEXT_SPLIT_RE.split(text):
-        cleaned = re.sub(r"\s+", " ", part).strip(" .,:;-")
+        cleaned = normalize_fragment_text(part)
         if not cleaned or cleaned in STOPWORDS:
             continue
         if len(cleaned) <= 2:
@@ -505,6 +678,278 @@ def split_text_fragments(text: str) -> list[str]:
 
 def deduplicate_preserve_order(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def should_show_progress() -> bool:
+    return parse_bool_env("QUAL_SHOW_PROGRESS", default=True)
+
+
+def classify_fragment_with_explicit_rule(fragment: str) -> str | None:
+    matches = [
+        label
+        for label, pattern in EXPLICIT_THEME_PATTERNS
+        if re.search(pattern, fragment, flags=re.IGNORECASE)
+    ]
+    matches = deduplicate_preserve_order(matches)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def is_non_informative_text(text: str) -> bool:
+    if not text:
+        return True
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in NON_INFORMATIVE_EXACT_PATTERNS)
+
+
+def canonicalize_token(token: str) -> str:
+    if not token:
+        return token
+    if token in TOKEN_NORMALIZATION_MAP:
+        return TOKEN_NORMALIZATION_MAP[token]
+    if any(token.endswith(ending) for ending in INVARIABLE_TOKEN_ENDINGS):
+        return token
+    if len(token) <= 3:
+        return token
+    if token.endswith("ie") and len(token) > 4:
+        return token[:-2] + "ia"
+    if token.endswith("i") and len(token) > 4:
+        return token[:-1] + "o"
+    return token
+
+
+def canonicalize_fragment_tokens(text: str) -> str:
+    for source, target in PHRASE_NORMALIZATION_MAP.items():
+        text = re.sub(rf"\b{re.escape(source)}\b", target, text)
+    tokens = [canonicalize_token(token) for token in text.split() if token]
+    return " ".join(tokens).strip()
+
+
+def normalize_fragment_text(fragment: str) -> str:
+    cleaned = normalize_free_text(fragment)
+    if not cleaned:
+        return ""
+
+    if is_non_informative_text(cleaned):
+        return ""
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-")
+
+    changed = True
+    while changed and cleaned:
+        previous = cleaned
+        for pattern in FRAGMENT_LEADING_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        for pattern in LEADING_FILLER_PATTERNS:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-")
+        changed = cleaned != previous
+
+    for pattern in FRAGMENT_TRAILING_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-")
+
+    tokens = [token for token in cleaned.split() if token]
+    while tokens and tokens[0] in GENERIC_FRAGMENT_TOKENS:
+        tokens.pop(0)
+    while tokens and tokens[-1] in GENERIC_FRAGMENT_TOKENS:
+        tokens.pop()
+
+    cleaned = canonicalize_fragment_tokens(" ".join(tokens).strip())
+    if is_non_informative_text(cleaned):
+        return ""
+    return cleaned
+
+
+@lru_cache(maxsize=1)
+def get_zero_shot_runtime() -> tuple[object, str, str]:
+    try:
+        import torch
+        from transformers import pipeline
+    except ImportError as exc:
+        raise RuntimeError(
+            "Per la classificazione ML di apprezzamenti e critiche serve il pacchetto 'transformers' "
+            "(ed il relativo backend PyTorch)."
+        ) from exc
+
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    local_only = parse_bool_env("QUAL_SENTIMENT_LOCAL_ONLY", default=False)
+    preferred_device = os.environ.get("QUAL_SENTIMENT_DEVICE", "auto").strip().lower()
+    use_mps = preferred_device in {"auto", "mps"} and torch.backends.mps.is_built() and torch.backends.mps.is_available()
+    if preferred_device == "cpu":
+        runtime_device = "cpu"
+    elif preferred_device == "mps" and not use_mps:
+        runtime_device = "cpu"
+    else:
+        runtime_device = "mps" if use_mps else "cpu"
+
+    pipeline_kwargs: dict[str, object] = {
+        "cache_dir": str(HF_CACHE_DIR),
+        "local_files_only": local_only,
+        "device": runtime_device,
+    }
+    if runtime_device == "mps":
+        pipeline_kwargs["torch_dtype"] = torch.float16
+
+    last_error: Exception | None = None
+
+    for model_name in deduplicate_preserve_order(ZERO_SHOT_FALLBACK_MODELS):
+        try:
+            classifier = pipeline(
+                "zero-shot-classification",
+                model=model_name,
+                **pipeline_kwargs,
+            )
+            return classifier, model_name, runtime_device
+        except Exception as exc:  # pragma: no cover - depends on runtime/model availability
+            last_error = exc
+
+    raise RuntimeError(
+        "Impossibile inizializzare il classificatore Hugging Face per apprezzamenti/critiche. "
+        f"Modelli tentati: {', '.join(deduplicate_preserve_order(ZERO_SHOT_FALLBACK_MODELS))}. "
+        f"Cache usata: {HF_CACHE_DIR}. Device richiesto: {runtime_device}. Ultimo errore: {last_error}"
+    )
+
+
+def classify_fragments_with_ml(
+    fragments: list[str],
+    *,
+    candidate_labels: list[str],
+    threshold: float = DEFAULT_ZERO_SHOT_THRESHOLD,
+    max_labels: int = DEFAULT_ZERO_SHOT_MAX_LABELS,
+) -> list[list[dict[str, object]]]:
+    if not fragments:
+        return []
+
+    final_rows: list[list[dict[str, object]] | None] = [None] * len(fragments)
+    unresolved_fragments: list[str] = []
+    unresolved_positions: list[int] = []
+
+    for idx, fragment in enumerate(fragments):
+        explicit_label = classify_fragment_with_explicit_rule(fragment)
+        if explicit_label is not None:
+            final_rows[idx] = [
+                {
+                    "frammento": fragment,
+                    "tema": explicit_label,
+                    "etichetta_modello": explicit_label,
+                    "score_modello": 1.0,
+                    "rank_modello": 1,
+                    "tema_top1_modello": explicit_label,
+                    "etichetta_top1_modello": explicit_label,
+                    "score_top1_modello": 1.0,
+                    "classifica_modello_top3": f"{explicit_label}=1.0000",
+                    "metodo_classificazione": "regola_esplicita_o_ml_zero_shot",
+                    "modello_hf": "regola_esplicita",
+                    "device_inferenza": "n/a",
+                }
+            ]
+        else:
+            unresolved_fragments.append(fragment)
+            unresolved_positions.append(idx)
+
+    if not unresolved_fragments:
+        return [rows if rows is not None else [] for rows in final_rows]
+
+    classifier, model_name, runtime_device = get_zero_shot_runtime()
+    raw_result = classifier(
+        unresolved_fragments,
+        candidate_labels=candidate_labels,
+        multi_label=True,
+        hypothesis_template=ZERO_SHOT_HYPOTHESIS_TEMPLATE,
+        batch_size=DEFAULT_ZERO_SHOT_BATCH_SIZE,
+    )
+    if isinstance(raw_result, dict):
+        raw_results = [raw_result]
+    else:
+        raw_results = list(raw_result)
+
+    for position, fragment, result in zip(unresolved_positions, unresolved_fragments, raw_results):
+        ranked = [
+            {
+                "tema": SENTIMENT_THEME_LABEL_MAP.get(label, label),
+                "etichetta_modello": label,
+                "score_modello": round(float(score), 4),
+            }
+            for label, score in zip(result["labels"], result["scores"])
+        ]
+        selected = [item for item in ranked if item["score_modello"] >= threshold][:max_labels]
+        if not selected and ranked:
+            selected = [ranked[0]]
+
+        ranking_preview = " | ".join(f"{item['tema']}={item['score_modello']:.4f}" for item in ranked[:3])
+        top1 = ranked[0] if ranked else {"tema": UNDEFINED_LABEL, "etichetta_modello": UNDEFINED_LABEL, "score_modello": 0.0}
+
+        rows: list[dict[str, object]] = []
+        for idx, item in enumerate(selected, start=1):
+            rows.append(
+                {
+                    "frammento": fragment,
+                    "tema": item["tema"],
+                    "etichetta_modello": item["etichetta_modello"],
+                    "score_modello": item["score_modello"],
+                    "rank_modello": idx,
+                    "tema_top1_modello": top1["tema"],
+                    "etichetta_top1_modello": top1["etichetta_modello"],
+                    "score_top1_modello": top1["score_modello"],
+                    "classifica_modello_top3": ranking_preview,
+                    "metodo_classificazione": "regola_esplicita_o_ml_zero_shot",
+                    "modello_hf": model_name,
+                    "device_inferenza": runtime_device,
+                }
+            )
+        final_rows[position] = rows
+
+    return [rows if rows is not None else [] for rows in final_rows]
+
+
+def classify_text_fragments_ml(
+    text: str,
+    *,
+    candidate_labels: list[str],
+    extra_negation_patterns: list[str] | None = None,
+    threshold: float = DEFAULT_ZERO_SHOT_THRESHOLD,
+    max_labels: int = DEFAULT_ZERO_SHOT_MAX_LABELS,
+) -> tuple[list[dict[str, object]], list[str], str]:
+    normalized = normalize_free_text(text)
+    if is_negative_or_empty_text(normalized, extra_patterns=extra_negation_patterns):
+        return [], [], normalized
+
+    # La multi-label e gestita a livello di risposta tramite piu frammenti distinti:
+    # ogni frammento riceve una sola categoria prevalente, mentre una risposta come
+    # "spiagge e cibo" produce due temi diversi perche viene spezzata in due unita.
+    fragments = split_text_fragments(normalized)
+    if not fragments:
+        fragments = [normalized]
+
+    all_themes: list[str] = []
+    valid_fragments = [
+        fragment
+        for fragment in fragments
+        if not is_negative_or_empty_text(fragment, extra_patterns=extra_negation_patterns)
+    ]
+    if not valid_fragments:
+        return [], [], normalized
+
+    batched_matches = classify_fragments_with_ml(
+        valid_fragments,
+        candidate_labels=candidate_labels,
+        threshold=threshold,
+        max_labels=max_labels,
+    )
+    audit_rows: list[dict[str, object]] = []
+    for matches in batched_matches:
+        audit_rows.extend(matches)
+        all_themes.extend(item["tema"] for item in matches)
+
+    return audit_rows, deduplicate_preserve_order(all_themes), normalized
 
 
 def classify_text_fragments(
@@ -656,6 +1101,191 @@ def build_open_text_outputs(
     }
 
 
+def build_ml_open_text_outputs(
+    df: pd.DataFrame,
+    *,
+    text_col: str,
+    group_cols: list[str],
+    candidate_labels: list[str],
+    tema_col_name: str,
+    top_n: int,
+    audit_sheet_name: str,
+    summary_sheet_name: str,
+    fragments_sheet_name: str,
+    extra_audit_cols: list[str] | None = None,
+    extra_negation_patterns: list[str] | None = None,
+    progress_label: str | None = None,
+) -> dict[str, pd.DataFrame]:
+    extra_audit_cols = extra_audit_cols or []
+    audit_rows: list[dict[str, object]] = []
+    summary_rows: list[dict[str, object]] = []
+    fragment_rows: list[dict[str, object]] = []
+    row_iterator = df.iterrows()
+    if should_show_progress():
+        row_iterator = tqdm(
+            row_iterator,
+            total=len(df),
+            desc=progress_label or f"Classificazione ML {text_col}",
+            unit="risposta",
+            dynamic_ncols=True,
+        )
+
+    for _, row in row_iterator:
+        raw_text = prettify_value(row[text_col])
+        audit_fragments, response_themes, normalized = classify_text_fragments_ml(
+            str(row[text_col]),
+            candidate_labels=candidate_labels,
+            extra_negation_patterns=extra_negation_patterns,
+        )
+        if not normalized:
+            continue
+
+        base_audit = {
+            ID_COL: row[ID_COL],
+            "testo_originale": raw_text,
+            "testo_normalizzato": normalized,
+            "tema_primario": response_themes[0] if response_themes else UNDEFINED_LABEL,
+            "temi_tutti": " | ".join(response_themes) if response_themes else UNDEFINED_LABEL,
+            "metodo_classificazione": ZERO_SHOT_METHOD_LABEL,
+        }
+        for col in group_cols + extra_audit_cols:
+            base_audit[col] = row[col]
+
+        if not audit_fragments:
+            audit_rows.append(
+                {
+                    **base_audit,
+                    "frammento": "",
+                    "tema": UNDEFINED_LABEL,
+                    "score_modello": "",
+                    "rank_modello": "",
+                    "tema_top1_modello": "",
+                    "score_top1_modello": "",
+                    "classifica_modello_top3": "",
+                    "modello_hf": "",
+                }
+            )
+            continue
+
+        for item in audit_fragments:
+            audit_rows.append({**base_audit, **item})
+
+        response_theme_scores: dict[str, float] = {}
+        for item in audit_fragments:
+            theme = str(item["tema"])
+            score = float(item["score_modello"])
+            response_theme_scores[theme] = max(response_theme_scores.get(theme, 0.0), score)
+
+        for theme in response_themes:
+            base = {col: row[col] for col in group_cols}
+            base.update(
+                {
+                    tema_col_name: theme,
+                    ID_COL: row[ID_COL],
+                    COMPONENTS_COL: row[COMPONENTS_COL],
+                }
+            )
+            summary_rows.append(base)
+
+        seen_pairs_scores: dict[tuple[str, str], float] = {}
+        for item in audit_fragments:
+            pair = (item["frammento"], item["tema"])
+            seen_pairs_scores[pair] = max(seen_pairs_scores.get(pair, 0.0), float(item["score_modello"]))
+
+        for pair, score in seen_pairs_scores.items():
+            frammento, tema = pair
+            base = {col: row[col] for col in group_cols}
+            base.update(
+                {
+                    "frammento": frammento,
+                    tema_col_name: tema,
+                    ID_COL: row[ID_COL],
+                    COMPONENTS_COL: row[COMPONENTS_COL],
+                }
+            )
+            fragment_rows.append(base)
+
+    audit_df = pd.DataFrame(audit_rows)
+    if audit_df.empty:
+        audit_df = pd.DataFrame(
+            columns=[
+                ID_COL,
+                *group_cols,
+                *extra_audit_cols,
+                "testo_originale",
+                "testo_normalizzato",
+                "frammento",
+                "tema",
+                "etichetta_modello",
+                "score_modello",
+                "rank_modello",
+                "tema_top1_modello",
+                "etichetta_top1_modello",
+                "score_top1_modello",
+                "classifica_modello_top3",
+                "tema_primario",
+                "temi_tutti",
+                "metodo_classificazione",
+                "modello_hf",
+                "device_inferenza",
+            ]
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    if summary_df.empty:
+        summary_out = pd.DataFrame(
+            columns=[
+                *group_cols,
+                tema_col_name,
+                "questionari",
+                "componenti",
+                "pct_su_gruppo",
+            ]
+        )
+    else:
+        summary_out = (
+            summary_df.groupby([*group_cols, tema_col_name], dropna=False, as_index=False)
+            .agg(questionari=(ID_COL, "nunique"), componenti=(COMPONENTS_COL, "sum"))
+            .sort_values(
+                by=[*group_cols, "questionari", "componenti", tema_col_name],
+                ascending=[True] * len(group_cols) + [False, False, True],
+                kind="mergesort",
+            )
+        )
+        summary_out = add_share_within_group(summary_out, group_cols)
+
+    fragment_df = pd.DataFrame(fragment_rows)
+    if fragment_df.empty:
+        fragment_out = pd.DataFrame(
+            columns=[
+                *group_cols,
+                "frammento",
+                tema_col_name,
+                "questionari",
+                "componenti",
+                "pct_su_gruppo",
+            ]
+        )
+    else:
+        fragment_out = (
+            fragment_df.groupby([*group_cols, "frammento", tema_col_name], dropna=False, as_index=False)
+            .agg(questionari=(ID_COL, "nunique"), componenti=(COMPONENTS_COL, "sum"))
+            .sort_values(
+                by=[*group_cols, "questionari", "componenti", "frammento"],
+                ascending=[True] * len(group_cols) + [False, False, True],
+                kind="mergesort",
+            )
+        )
+        fragment_out = fragment_out.groupby(group_cols, dropna=False, group_keys=False).head(top_n).reset_index(drop=True)
+        fragment_out = add_share_within_group(fragment_out, group_cols)
+
+    return {
+        audit_sheet_name: audit_df,
+        summary_sheet_name: summary_out,
+        fragments_sheet_name: fragment_out,
+    }
+
+
 def build_text_theme_table(
     df: pd.DataFrame,
     *,
@@ -764,6 +1394,55 @@ def build_top_n_by_group(
     return add_share_within_group(out, group_cols)
 
 
+def build_ranked_theme_priorities(
+    df: pd.DataFrame,
+    *,
+    group_cols: list[str],
+    theme_col: str = "tema",
+    top_n: int | None = None,
+) -> pd.DataFrame:
+    if df.empty:
+        cols = [*group_cols, theme_col, "questionari", "componenti", "pct_su_gruppo", "rank_nel_gruppo"]
+        return pd.DataFrame(columns=cols)
+
+    out = df.sort_values(
+        by=[*group_cols, "questionari", "componenti", theme_col],
+        ascending=[True] * len(group_cols) + [False, False, True],
+        kind="mergesort",
+    ).copy()
+    out["rank_nel_gruppo"] = out.groupby(group_cols).cumcount() + 1
+    if top_n is not None:
+        out = out[out["rank_nel_gruppo"] <= top_n].copy()
+    return out.reset_index(drop=True)
+
+
+def compute_text_quality_stats(series: pd.Series) -> dict[str, int]:
+    total = int(len(series))
+    valid = 0
+    discarded_empty_or_null = 0
+    discarded_non_informative = 0
+
+    for value in series.tolist():
+        normalized = normalize_free_text(value)
+        if not normalized:
+            discarded_empty_or_null += 1
+            continue
+        if is_non_informative_text(normalized):
+            discarded_non_informative += 1
+            continue
+        if not split_text_fragments(normalized):
+            discarded_non_informative += 1
+            continue
+        valid += 1
+
+    return {
+        "totale_risposte": total,
+        "risposte_valide": valid,
+        "scartate_vuote_nulle": discarded_empty_or_null,
+        "scartate_non_informative": discarded_non_informative,
+    }
+
+
 def prepare_dataframe(input_file: Path, sheet_name: str) -> pd.DataFrame:
     raw = pd.read_excel(input_file, sheet_name=sheet_name)
     validate_columns(raw)
@@ -796,6 +1475,9 @@ def prepare_dataframe(input_file: Path, sheet_name: str) -> pd.DataFrame:
 
 def build_outputs(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
     outputs: dict[str, pd.DataFrame] = {}
+    _, runtime_model_name, runtime_device = get_zero_shot_runtime()
+    strengths_stats = compute_text_quality_stats(df[STRENGTHS_COL])
+    weaknesses_stats = compute_text_quality_stats(df[WEAKNESSES_COL])
 
     meta_rows = [
         {"chiave": "sheet_campione", "valore": sheet_name},
@@ -803,6 +1485,22 @@ def build_outputs(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
         {"chiave": "componenti_totali", "valore": int(df[COMPONENTS_COL].sum())},
         {"chiave": "italiani_questionari", "valore": int(df["macro_provenienza"].eq("ITALIANI").sum())},
         {"chiave": "stranieri_questionari", "valore": int(df["macro_provenienza"].eq("STRANIERI").sum())},
+        {"chiave": "web_specifica_metodo", "valore": "regole_testuali_keyword_non_ml"},
+        {"chiave": "classificazione_sentiment_metodo", "valore": ZERO_SHOT_METHOD_LABEL},
+        {"chiave": "classificazione_sentiment_modello_preferito", "valore": DEFAULT_ZERO_SHOT_MODEL},
+        {"chiave": "classificazione_sentiment_modello_effettivo", "valore": runtime_model_name},
+        {"chiave": "classificazione_sentiment_cache_dir", "valore": str(HF_CACHE_DIR)},
+        {"chiave": "classificazione_sentiment_device", "valore": runtime_device},
+        {"chiave": "classificazione_sentiment_batch_size", "valore": DEFAULT_ZERO_SHOT_BATCH_SIZE},
+        {"chiave": "classificazione_sentiment_descrizioni_categorie", "valore": "SI"},
+        {"chiave": "apprezzamenti_totale_risposte", "valore": strengths_stats["totale_risposte"]},
+        {"chiave": "apprezzamenti_risposte_valide", "valore": strengths_stats["risposte_valide"]},
+        {"chiave": "apprezzamenti_scartate_vuote_nulle", "valore": strengths_stats["scartate_vuote_nulle"]},
+        {"chiave": "apprezzamenti_scartate_non_informative", "valore": strengths_stats["scartate_non_informative"]},
+        {"chiave": "miglioramenti_totale_risposte", "valore": weaknesses_stats["totale_risposte"]},
+        {"chiave": "miglioramenti_risposte_valide", "valore": weaknesses_stats["risposte_valide"]},
+        {"chiave": "miglioramenti_scartate_vuote_nulle", "valore": weaknesses_stats["scartate_vuote_nulle"]},
+        {"chiave": "miglioramenti_scartate_non_informative", "valore": weaknesses_stats["scartate_non_informative"]},
     ]
     outputs["meta"] = pd.DataFrame(meta_rows)
 
@@ -943,36 +1641,46 @@ def build_outputs(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
     )
 
     outputs.update(
-        build_open_text_outputs(
+        build_ml_open_text_outputs(
             df,
             text_col=STRENGTHS_COL,
             group_cols=["macro_provenienza"],
-            patterns=THEME_PATTERNS,
-            default_label="ALTRO/NON CLASSIFICATO",
+            candidate_labels=SENTIMENT_THEME_LABELS,
             tema_col_name="tema",
             top_n=20,
             audit_sheet_name="audit_apprezzamenti",
             summary_sheet_name="punti_forza_temi",
             fragments_sheet_name="punti_forza_top20",
             extra_audit_cols=["destinazione_prevalente", PRIMARY_REASON_COL],
+            progress_label="Classificazione ML apprezzamenti",
         )
+    )
+    outputs["punti_forza_top_temi"] = build_ranked_theme_priorities(
+        outputs["punti_forza_temi"],
+        group_cols=["macro_provenienza"],
+        top_n=10,
     )
 
     dissent_df = df[df["giudizio_norm"].isin(["SUFFICIENTE", "PESSIMO"])].copy()
     outputs.update(
-        build_open_text_outputs(
+        build_ml_open_text_outputs(
             dissent_df,
             text_col=WEAKNESSES_COL,
             group_cols=["macro_provenienza", "giudizio_norm"],
-            patterns=WEAKNESS_PATTERNS,
-            default_label="ALTRO/NON CLASSIFICATO",
+            candidate_labels=SENTIMENT_THEME_LABELS,
             tema_col_name="tema",
             top_n=20,
             audit_sheet_name="audit_dissenso",
             summary_sheet_name="dissenso_temi",
             fragments_sheet_name="dissenso_top20",
             extra_audit_cols=["destinazione_prevalente", PRIMARY_REASON_COL],
+            progress_label="Classificazione ML dissenso",
         )
+    )
+    outputs["dissenso_priorita_intervento"] = build_ranked_theme_priorities(
+        outputs["dissenso_temi"],
+        group_cols=["macro_provenienza", "giudizio_norm"],
+        top_n=10,
     )
     outputs["dissenso_dettaglio"] = dissent_df[
         [
@@ -1007,53 +1715,48 @@ def prepare_dataframe_1d(input_file: Path, sheet_name: str) -> pd.DataFrame:
 
 def build_outputs_1d(df: pd.DataFrame, sheet_name: str) -> dict[str, pd.DataFrame]:
     outputs: dict[str, pd.DataFrame] = {}
+    _, runtime_model_name, runtime_device = get_zero_shot_runtime()
+    strengths_stats = compute_text_quality_stats(df[STRENGTHS_COL])
     meta_rows = [
         {"chiave": "sheet_campione", "valore": sheet_name},
         {"chiave": "questionari_totali", "valore": int(len(df))},
         {"chiave": "questionari_con_apprezzamenti", "valore": int(((df[PRIMARY_REASON_COL] != "") & (df[STRENGTHS_COL] != "")).sum())},
         {"chiave": "componenti_totali", "valore": int(df[COMPONENTS_COL].sum())},
+        {"chiave": "classificazione_sentiment_metodo", "valore": ZERO_SHOT_METHOD_LABEL},
+        {"chiave": "classificazione_sentiment_modello_preferito", "valore": DEFAULT_ZERO_SHOT_MODEL},
+        {"chiave": "classificazione_sentiment_modello_effettivo", "valore": runtime_model_name},
+        {"chiave": "classificazione_sentiment_device", "valore": runtime_device},
+        {"chiave": "classificazione_sentiment_batch_size", "valore": DEFAULT_ZERO_SHOT_BATCH_SIZE},
+        {"chiave": "classificazione_sentiment_descrizioni_categorie", "valore": "SI"},
+        {"chiave": "apprezzamenti_totale_risposte", "valore": strengths_stats["totale_risposte"]},
+        {"chiave": "apprezzamenti_risposte_valide", "valore": strengths_stats["risposte_valide"]},
+        {"chiave": "apprezzamenti_scartate_vuote_nulle", "valore": strengths_stats["scartate_vuote_nulle"]},
+        {"chiave": "apprezzamenti_scartate_non_informative", "valore": strengths_stats["scartate_non_informative"]},
     ]
     outputs["c1d_meta"] = pd.DataFrame(meta_rows)
 
     working = df[(df[PRIMARY_REASON_COL] != "") & (df[STRENGTHS_COL] != "")].copy()
-    rows: list[dict[str, object]] = []
-    for _, row in working.iterrows():
-        elementi = split_apprezzamenti_1d(str(row[STRENGTHS_COL]))
-        if not elementi:
-            continue
-        for elemento in elementi:
-            rows.append(
-                {
-                    "macro_provenienza": row["macro_provenienza"],
-                    PRIMARY_REASON_COL: row[PRIMARY_REASON_COL],
-                    "elemento_apprezzamento": elemento,
-                    "questionari": 1,
-                    "componenti": float(row[COMPONENTS_COL]),
-                }
-            )
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        outputs["c1d_top_apprezzamenti"] = pd.DataFrame(
-            columns=["macro_provenienza", PRIMARY_REASON_COL, "elemento_apprezzamento", "questionari", "componenti", "rank_nel_gruppo"]
-        )
-        outputs["c1d_dettaglio_completo"] = outputs["c1d_top_apprezzamenti"].copy()
-        return outputs
-
-    grouped = (
-        out.groupby(["macro_provenienza", PRIMARY_REASON_COL, "elemento_apprezzamento"], as_index=False)
-        .agg(questionari=("questionari", "sum"), componenti=("componenti", "sum"))
+    ml_outputs = build_ml_open_text_outputs(
+        working,
+        text_col=STRENGTHS_COL,
+        group_cols=["macro_provenienza", PRIMARY_REASON_COL],
+        candidate_labels=SENTIMENT_THEME_LABELS,
+        tema_col_name="tema",
+        top_n=20,
+        audit_sheet_name="c1d_audit_apprezzamenti",
+        summary_sheet_name="c1d_dettaglio_completo",
+        fragments_sheet_name="c1d_frammenti_top20",
+        progress_label="Classificazione ML apprezzamenti campione 1d",
     )
-    grouped["componenti"] = grouped["componenti"].round(0).astype(int)
-    grouped = grouped.sort_values(
-        by=["macro_provenienza", PRIMARY_REASON_COL, "questionari", "componenti", "elemento_apprezzamento"],
-        ascending=[True, True, False, False, True],
-        kind="mergesort",
-    )
-    grouped["rank_nel_gruppo"] = grouped.groupby(["macro_provenienza", PRIMARY_REASON_COL]).cumcount() + 1
+    outputs.update(ml_outputs)
 
-    outputs["c1d_top_apprezzamenti"] = grouped[grouped["rank_nel_gruppo"] <= 10].copy()
+    grouped = build_ranked_theme_priorities(
+        outputs["c1d_dettaglio_completo"],
+        group_cols=["macro_provenienza", PRIMARY_REASON_COL],
+        top_n=None,
+    )
     outputs["c1d_dettaglio_completo"] = grouped
+    outputs["c1d_top_apprezzamenti"] = grouped[grouped["rank_nel_gruppo"] <= 10].copy()
     return outputs
 
 
@@ -1090,8 +1793,10 @@ REPORT_LAYOUT = [
             ("web_cosa_prenotata", "Cosa viene prenotato via web"),
             ("web_dettagli_top20", "Top 20 frammenti web"),
             ("punti_forza_temi", "Temi dei punti di forza"),
+            ("punti_forza_top_temi", "Top temi dei punti di forza per provenienza"),
             ("punti_forza_top20", "Top 20 frammenti punti di forza"),
             ("dissenso_temi", "Temi del dissenso"),
+            ("dissenso_priorita_intervento", "Priorita di intervento per provenienza e giudizio"),
             ("dissenso_top20", "Top 20 frammenti del dissenso"),
             ("dissenso_dettaglio", "Dettaglio questionari con dissenso"),
         ],
@@ -1110,8 +1815,10 @@ REPORT_LAYOUT = [
         "Analisi qualitative - campione 1d",
         [
             ("c1d_meta", "Metadati campione 1d"),
-            ("c1d_top_apprezzamenti", "Top 10 apprezzamenti per provenienza e motivazione"),
-            ("c1d_dettaglio_completo", "Dettaglio completo apprezzamenti campione 1d"),
+            ("c1d_top_apprezzamenti", "Top 10 temi apprezzamenti per provenienza e motivazione"),
+            ("c1d_dettaglio_completo", "Dettaglio completo temi apprezzamenti campione 1d"),
+            ("c1d_frammenti_top20", "Top 20 frammenti apprezzamenti campione 1d"),
+            ("c1d_audit_apprezzamenti", "Audit classificazione ML apprezzamenti campione 1d"),
         ],
     ),
 ]

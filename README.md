@@ -172,8 +172,10 @@ python3 build_analisi_qualitative_campione1.py --input questionari_sottocampioni
 	- `giudizio_distrib`
 	- `giudizio_top15_dest`
 	- `punti_forza_temi`
+	- `punti_forza_top_temi`
 	- `punti_forza_top20`
 	- `dissenso_temi`
+	- `dissenso_priorita_intervento`
 	- `dissenso_top20`
 	- `dissenso_dettaglio`
 
@@ -185,4 +187,14 @@ python3 build_analisi_qualitative_campione1.py --input questionari_sottocampioni
 - `provenienza_associata`: regione per italiani, stato per stranieri.
 - `media_giudizio`: conversione `Pessimo=1`, `Sufficiente=2`, `Buono=3`, `Ottimo=4`.
 - Le categorie `NON DEFINITO` vengono mantenute nelle analisi distributive per preservare i totali del campione.
-- Le analisi su `web_specifica`, `apprezzamenti` e `miglioramenti` includono sia temi classificati per parola chiave sia top frammenti testuali piu frequenti.
+- `web_specifica` continua a essere classificato per regole testuali; `apprezzamenti` e `miglioramenti/consigli` usano invece una classificazione ML zero-shot Hugging Face.
+- La logica multi-label e gestita a livello di risposta: il testo viene spezzato in frammenti distinti e ogni frammento riceve una sola categoria prevalente. In questo modo `mare` resta in una sola categoria, mentre `spiagge e cibo` genera due temi realistici nella stessa risposta.
+- Prima della classificazione, i frammenti subiscono una normalizzazione di base: rimozione di articoli, introduttori valutativi e aggettivi generici, in modo da ricondurre espressioni come `il mare`, `mi è piaciuto il mare`, `bellissime spiagge` o `buon cibo` a nuclei piu stabili.
+- La normalizzazione ricompone anche varianti singolare/plurale e maschile/femminile piu frequenti nel dominio, per esempio `spiaggia/spiagge`, `strada/strade`, `prezzo/prezzi`, `costoso/costosa/costosi`.
+- Risposte vuote, nulle o non informative come `NULL`, `vuoto`, `tutto`, `niente`, `tutto bene`, `niente da migliorare` o `non saprei` vengono escluse dalla classificazione tematica.
+- Il foglio `meta` riporta anche quanti testi sono stati considerati validi e quanti sono stati scartati come vuoti/nulli o non informativi, separatamente per `apprezzamenti` e `miglioramenti`.
+- Le tabelle di sintesi restano leggibili e mostrano soprattutto `questionari`, `componenti` e `pct_su_gruppo`; i punteggi di confidenza del modello restano disponibili nell'audit tecnico.
+- `punti_forza_top_temi` confronta in modo diretto italiani e stranieri sui temi piu apprezzati.
+- `dissenso_priorita_intervento` isola, tra chi ha espresso giudizi `SUFFICIENTE` o `PESSIMO`, le priorita di intervento urgenti per provenienza e livello di giudizio.
+- Durante la run del campione base, la classificazione ML mostra una barra di avanzamento con ETA per `apprezzamenti` e `dissenso`; `web_specifica` resta fuori da questa fase perche continua a usare regole testuali.
+- La stessa logica ML multi-label viene applicata anche al blocco `campione_1d`, con ranking dei temi per `macro_provenienza x motivazione_principale`, top frammenti e audit dedicato.
