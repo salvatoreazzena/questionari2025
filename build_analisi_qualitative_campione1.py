@@ -1062,6 +1062,7 @@ def build_open_text_outputs(
         audit_df = pd.DataFrame(
             columns=[ID_COL, *group_cols, *extra_audit_cols, "testo_originale", "testo_normalizzato", "frammento", "tema", "keyword_attivante", "tema_primario", "temi_tutti"]
         )
+    audit_df = compact_rule_based_audit_df(audit_df, group_cols=group_cols, extra_audit_cols=extra_audit_cols)
 
     summary_df = pd.DataFrame(summary_rows)
     if summary_df.empty:
@@ -1230,6 +1231,7 @@ def build_ml_open_text_outputs(
                 "device_inferenza",
             ]
         )
+    audit_df = compact_ml_audit_df(audit_df, group_cols=group_cols, extra_audit_cols=extra_audit_cols)
 
     summary_df = pd.DataFrame(summary_rows)
     if summary_df.empty:
@@ -1284,6 +1286,51 @@ def build_ml_open_text_outputs(
         summary_sheet_name: summary_out,
         fragments_sheet_name: fragment_out,
     }
+
+
+def compact_rule_based_audit_df(
+    audit_df: pd.DataFrame,
+    *,
+    group_cols: list[str],
+    extra_audit_cols: list[str],
+) -> pd.DataFrame:
+    desired_columns = [
+        ID_COL,
+        *group_cols,
+        *extra_audit_cols,
+        "testo_originale",
+        "frammento",
+        "tema",
+        "keyword_attivante",
+    ]
+    available_columns = [col for col in desired_columns if col in audit_df.columns]
+    out = audit_df.loc[:, available_columns].copy()
+    if ID_COL in out.columns:
+        out = out.sort_values(by=[ID_COL], kind="mergesort").reset_index(drop=True)
+    return out
+
+
+def compact_ml_audit_df(
+    audit_df: pd.DataFrame,
+    *,
+    group_cols: list[str],
+    extra_audit_cols: list[str],
+) -> pd.DataFrame:
+    desired_columns = [
+        ID_COL,
+        *group_cols,
+        *extra_audit_cols,
+        "testo_originale",
+        "frammento",
+        "tema",
+        "score_modello",
+        "classifica_modello_top3",
+    ]
+    available_columns = [col for col in desired_columns if col in audit_df.columns]
+    out = audit_df.loc[:, available_columns].copy()
+    if ID_COL in out.columns:
+        out = out.sort_values(by=[ID_COL], kind="mergesort").reset_index(drop=True)
+    return out
 
 
 def build_text_theme_table(
@@ -1849,15 +1896,20 @@ def style_worksheet(ws) -> None:
             if cell.row == 1 and cell.column == 1:
                 cell.fill = title_fill
                 cell.font = title_font
-                cell.alignment = Alignment(horizontal="left")
+                cell.alignment = Alignment(horizontal="left", vertical="top")
             elif isinstance(cell.value, str) and cell.value.startswith("Tabella: "):
                 cell.font = section_font
                 cell.fill = section_fill
+                cell.alignment = Alignment(vertical="top")
             elif cell.row > 1 and cell.column == 1 and isinstance(cell.value, str) and cell.value.startswith("Sezione: "):
                 cell.font = section_font
+                cell.alignment = Alignment(vertical="top")
             elif cell.font and cell.font.bold and cell.row > 1:
                 cell.fill = header_fill
                 cell.font = header_font
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+            else:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
 
             text_length = len(str(cell.value))
             max_widths[cell.column] = min(max(max_widths.get(cell.column, 0), text_length + 2), 45)
